@@ -145,10 +145,16 @@ class SensorModel:
 
     @classmethod
     def from_dict(cls, d: dict) -> "SensorModel":
-        d = dict(d)
-        d.pop("fingerprint", None)
-        d.pop("derived", None)
-        depth = d.pop("depth", None) or {}
+        # Drop derived fields and ANY key beginning with an underscore. Every
+        # JSON this project writes carries a leading "_comment" explaining
+        # itself, and a config file meant for a human to read has to survive
+        # being read back -- the shipped example did not, which is how this
+        # was found.
+        skip = ("fingerprint", "derived")
+        d = {k: v for k, v in d.items()
+             if not k.startswith("_") and k not in skip}
+        depth = {k: v for k, v in (d.pop("depth", None) or {}).items()
+                 if not k.startswith("_")}
         return cls(depth=DepthEncoding(**depth), **d)
 
     @classmethod

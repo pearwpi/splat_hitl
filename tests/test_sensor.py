@@ -129,3 +129,28 @@ def test_load_tolerates_derived_fields(tmp_path):
 def test_stereo_flag():
     assert not model().is_stereo
     assert model(stereo_baseline_m=0.065).is_stereo
+
+
+# ------------------------------------------------------- the shipped config
+def test_the_example_config_we_ship_actually_loads():
+    """The test that was missing: read our own input, not just our own output."""
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    cfg = os.path.join(here, "config", "sensor_model.example.json")
+    m = SensorModel.load(cfg)
+    assert m.width > 0 and m.height > 0
+    assert m.fingerprint()
+
+
+def test_underscore_keys_are_ignored_everywhere_in_the_dict():
+    d = model().to_dict()
+    d["_comment"] = ["a note", "spanning lines"]
+    d["depth"]["_why"] = "because"
+    assert SensorModel.from_dict(d).fingerprint() == model().fingerprint()
+
+
+def test_a_genuinely_unknown_key_still_raises():
+    """Ignoring _-prefixed keys must not become ignoring typos."""
+    d = model().to_dict()
+    d["widht"] = 160
+    with pytest.raises(TypeError):
+        SensorModel.from_dict(d)
