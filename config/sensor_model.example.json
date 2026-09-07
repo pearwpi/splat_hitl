@@ -1,0 +1,26 @@
+{
+  "_comment": [
+    "THE contract between training and HITL. Both sides load this file and",
+    "record its fingerprint into their run logs. If two logs disagree on the",
+    "fingerprint, the policy never saw the world it was flown in -- fix the",
+    "config, not the policy.",
+    "",
+    "Copy this per assignment. Do not edit it once students have trained",
+    "against it: changing any field below invalidates every trained policy."
+  ],
+  "name": "course_default_mono_depth",
+  "width": 160,
+  "height": 120,
+  "fov_x_deg": 90.0,
+  "mount_pitch_deg": 10.0,
+  "mount_yaw_deg": 0.0,
+  "stereo_baseline_m": null,
+  "depth": {
+    "kind": "metric",
+    "near_m": 0.3,
+    "far_m": 24.0,
+    "empty_depth_m": 12.0
+  },
+  "rate_hz": 30.0,
+  "notes": "Mono metric depth, camera pitched 10 deg down. Matches the DiffPhysDrone mount geometry without its inverse encoding."
+}
