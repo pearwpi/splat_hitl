@@ -46,7 +46,7 @@ TERMINATION_MAP = {
 
 _CSV_FIELDS = ["t_s", "x_m", "y_m", "z_m", "yaw_deg", "state",
                "cmd_vx", "cmd_vy", "cmd_yaw_rate", "cmd_z",
-               "clamped", "gates_passed", "pose_age_ms",
+               "clamped", "gates_passed", "pose_age_ms", "latency_ms",
                "render_ms", "policy_ms", "tick_ms"]
 
 
@@ -94,6 +94,8 @@ class RunRecorder:
             "gates_passed": int(self.extra.get("_gates_passed", 0)),
             "pose_age_ms": None if not math.isfinite(tick.pose_age_s)
                            else round(tick.pose_age_s * 1000.0, 2),
+            "latency_ms": None if not math.isfinite(getattr(tick, "latency_s", float("nan")))
+                          else round(tick.latency_s * 1000.0, 2),
             "render_ms": round(tick.render_s * 1000.0, 2),
             "policy_ms": round(tick.policy_s * 1000.0, 2),
             "tick_ms": round(tick.total_s * 1000.0, 2),

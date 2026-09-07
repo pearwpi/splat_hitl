@@ -367,3 +367,53 @@ def test_stop_does_not_overwrite_a_real_outcome():
     rt.step(0.0)                                   # no_pose -> FINISHED
     rt.stop("operator_stop")
     assert rt.reason == "no_pose"
+
+
+# --------------------------------------------------------------- clock safety
+def test_a_pose_from_the_future_is_fatal_not_silent():
+    """The bug the first live run exposed.
+
+    Comparing time.monotonic() against a ROS epoch header stamp gives an age
+    around -1.8e9 s. Nothing raises -- the staleness watchdog simply never
+    fires again, because a huge negative number never exceeds a threshold.
+    """
+    rt, src = build(samples=[PoseSample(1.788e9, np.array([1.0, 1.5, 0.6]), LEVEL)])
+    src.advance()
+    r = rt.step(1234.5)                       # monotonic-looking `now`
+    assert r.finished and r.reason == "clock_mismatch"
+    ev = " ".join(r.events)
+    assert "in the future" in ev and "clock disagree" in ev
+    assert "capture_t_s" in ev          # tells you the fix, not just the fault
+
+
+def test_a_small_negative_age_is_tolerated():
+    """Sub-second jitter between a source and the loop is normal, not fatal."""
+    rt, src = build(samples=[pose(0.5, 1.0)])
+    src.advance()
+    assert rt.step(0.2).state == RUNNING       # 300 ms "in the future"
+
+
+def test_the_skew_tolerance_is_configurable():
+    rt, src = build(samples=[pose(10.0, 1.0)],
+                    cfg=RuntimeConfig(max_clock_skew_s=20.0))
+    src.advance()
+    assert rt.step(0.0).state == RUNNING
+
+
+def test_capture_time_produces_a_latency_and_staleness_stays_local():
+    """Two clocks, two questions. The age must come from t_s, not capture."""
+    import time as _t
+    wall = _t.time()
+    s = PoseSample(100.0, np.array([1.0, 1.5, 0.6]), LEVEL,
+                   capture_t_s=wall - 0.005)
+    rt, src = build(samples=[s])
+    src.advance()
+    r = rt.step(100.02)
+    assert math.isclose(r.pose_age_s, 0.02, abs_tol=1e-6)     # from t_s
+    assert 0.0 < r.latency_s < 1.0                            # from capture_t_s
+
+
+def test_latency_is_nan_without_a_capture_stamp():
+    rt, src = build(samples=[pose(0.0, 1.0)])
+    src.advance()
+    assert not math.isfinite(rt.step(0.0).latency_s)

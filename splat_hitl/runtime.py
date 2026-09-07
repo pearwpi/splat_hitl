@@ -64,9 +64,24 @@ FINISHED = "finished"
 
 @dataclass(frozen=True)
 class PoseSample:
+    """A pose, carrying TWO times because they answer different questions.
+
+    t_s          the SOURCE's own clock, used for STALENESS. It must be the
+                 same clock the caller passes to `Runtime.step()`. A local
+                 monotonic receipt time is the right choice: it is immune to
+                 clock skew between this machine and the Vicon PC, and skew is
+                 exactly what a watchdog must not be fooled by.
+    capture_t_s  optional epoch time the frame was CAPTURED, from the bridge's
+                 capture-time stamping. For measuring LATENCY, never staleness.
+
+    Conflating them is not hypothetical: comparing `time.monotonic()` against a
+    ROS header stamp gives an age around -1.8e9 s, which silently disables the
+    staleness check because a huge negative number never exceeds a threshold.
+    """
     t_s: float
     position_m: np.ndarray
     quat_xyzw: Tuple[float, float, float, float]
+    capture_t_s: Optional[float] = None
 
     @property
     def yaw_rad(self) -> float:
@@ -159,6 +174,8 @@ class RuntimeConfig:
     yaw_sign: int = 1
     #: refuse to fly a policy trained through a different sensor model
     enforce_sensor_match: bool = True
+    #: a pose further than this into the future means the clocks disagree
+    max_clock_skew_s: float = 1.0
 
 
 @dataclass
@@ -168,6 +185,7 @@ class TickResult:
     clamped: Optional[Clamped] = None
     events: List[str] = field(default_factory=list)
     pose_age_s: float = float("nan")
+    latency_s: float = float("nan")
     render_s: float = 0.0
     policy_s: float = 0.0
     total_s: float = 0.0
@@ -248,6 +266,7 @@ class Runtime:
     def step(self, now: Optional[float] = None) -> TickResult:
         t_start = time.perf_counter()
         now = time.monotonic() if now is None else float(now)
+        now_wall = time.time()
         if self.t0 is None:
             self.t0 = now
         events: List[str] = []
@@ -262,6 +281,22 @@ class Runtime:
         if pose is None:
             return self._finish("no_pose", events)
         age = now - pose.t_s
+        if age < -self.cfg.max_clock_skew_s:
+            # A pose from the future means `now` and `t_s` are on different
+            # clocks -- almost always a ROS epoch header stamp compared against
+            # time.monotonic(). Left alone this does not raise: it just makes
+            # `age` enormously negative, so the staleness watchdog can never
+            # fire. A safety check that can be silently switched off by a unit
+            # error is worse than no check, so this is fatal and loud.
+            events.append(
+                "pose is %.0f s in the future -- the pose source's clock and "
+                "the loop's clock disagree. `PoseSample.t_s` must be on the "
+                "same clock you pass to step(); use capture_t_s for latency."
+                % (-age,))
+            return self._finish("clock_mismatch", events)
+        latency = (now_wall - pose.capture_t_s
+                   if (pose.capture_t_s is not None and now_wall is not None)
+                   else float("nan"))
 
         # --- scoring runs on the REAL pose, whatever the policy is doing ---
         if self.prev is not None:
@@ -366,7 +401,7 @@ class Runtime:
 
         self.prev = pose
         self.steps += 1
-        return self._record(TickResult(RUNNING, cmd, rep, events, age,
+        return self._record(TickResult(RUNNING, cmd, rep, events, age, latency,
                                        obs.render_s, policy_s, total))
 
     def _record(self, r: TickResult) -> TickResult:

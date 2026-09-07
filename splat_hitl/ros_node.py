@@ -88,9 +88,14 @@ class ViconPoseSource(PoseSource):
                 return
             o, q = t.translation, t.rotation
         h = msg.header.stamp
-        s = PoseSample(h.sec + h.nanosec * 1e-9,
+        # t_s is a LOCAL MONOTONIC receipt time, because that is what the
+        # staleness watchdog must compare against and it cannot be fooled by
+        # clock skew with the Vicon PC. The header stamp -- which the bridge
+        # sets to CAPTURE time -- rides along separately, for latency.
+        s = PoseSample(time.monotonic(),
                        np.array([o.x, o.y, o.z], dtype=float),
-                       (q.x, q.y, q.z, q.w))
+                       (q.x, q.y, q.z, q.w),
+                       capture_t_s=h.sec + h.nanosec * 1e-9)
         with self._lock:
             self._latest = s
 
