@@ -204,6 +204,7 @@ def main(argv=None) -> int:
         while rclpy.ok() and not done.is_set():
             rclpy.spin_once(node, timeout_sec=0.05)
     except KeyboardInterrupt:
+        rt.stop("operator_stop")
         rec.finish("operator_stop")
     finally:
         renderer.close()
@@ -212,8 +213,14 @@ def main(argv=None) -> int:
             rec.save_json(a.log)
             rec.save_csv(str(a.log).rsplit(".", 1)[0] + ".csv")
             print("  wrote %s" % a.log)
-        node.destroy_node()
-        rclpy.shutdown()
+        # Ctrl-C reaches rclpy's own signal handler first, which shuts the
+        # context down before this block runs; calling shutdown() again raises.
+        try:
+            node.destroy_node()
+        except Exception:
+            pass
+        if rclpy.ok():
+            rclpy.shutdown()
     return 0
 
 

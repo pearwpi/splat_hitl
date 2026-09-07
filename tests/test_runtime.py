@@ -347,3 +347,23 @@ def test_runtime_scores_in_the_scene_frame_through_the_wrapper():
         if r.finished:
             break
     assert r.reason == "course_complete"
+
+
+def test_stop_makes_the_runtime_and_the_caller_agree():
+    """A dry run used to end with the log saying operator_stop and the summary
+    still saying running."""
+    rt, src = build()
+    src.advance()
+    rt.step(0.0)
+    assert rt.state == RUNNING
+    rt.stop()
+    assert rt.state == FINISHED and rt.reason == "operator_stop"
+    assert "operator_stop" in rt.summary()
+    assert rt.step(1.0).finished
+
+
+def test_stop_does_not_overwrite_a_real_outcome():
+    rt, src = build()
+    rt.step(0.0)                                   # no_pose -> FINISHED
+    rt.stop("operator_stop")
+    assert rt.reason == "no_pose"

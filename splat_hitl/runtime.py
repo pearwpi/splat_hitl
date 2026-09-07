@@ -373,6 +373,17 @@ class Runtime:
         self.history.append(r)
         return r
 
+    def stop(self, reason: str = "operator_stop") -> None:
+        """End the run from outside -- Ctrl-C, a supervisor, a test.
+
+        Without this the caller records one outcome and the runtime reports
+        another, which is how a dry run ends with the log saying
+        `operator_stop` and the summary still saying `running`.
+        """
+        if self.state != FINISHED:
+            self.state = FINISHED
+            self.reason = reason
+
     # -- reporting ---------------------------------------------------------
     def summary(self) -> str:
         L = ["  policy      : %s" % self.policy.name,
