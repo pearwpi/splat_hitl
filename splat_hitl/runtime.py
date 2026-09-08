@@ -150,7 +150,12 @@ class TransformedPoseSource(PoseSource):
             return None
         pos = self.transform.point_to_splat(s.position_m).reshape(3)
         R = self.transform.rotation_to_splat(quat_to_matrix(*s.quat_xyzw))
-        return PoseSample(s.t_s, pos, matrix_to_quat(R))
+        # capture_t_s must ride along. Dropping it here silently turned
+        # end-to-end latency into NaN the moment a calibration transform was
+        # supplied -- that is, in exactly the real HITL configuration, and
+        # never in the fake-room dry runs this was tested with.
+        return PoseSample(s.t_s, pos, matrix_to_quat(R),
+                          capture_t_s=s.capture_t_s)
 
 
 @dataclass

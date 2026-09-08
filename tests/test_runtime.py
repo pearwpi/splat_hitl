@@ -417,3 +417,25 @@ def test_latency_is_nan_without_a_capture_stamp():
     rt, src = build(samples=[pose(0.0, 1.0)])
     src.advance()
     assert not math.isfinite(rt.step(0.0).latency_s)
+
+
+def test_transformed_source_preserves_capture_time():
+    """The transform must not eat the capture stamp.
+
+    `latency_s` is computed from `capture_t_s`. TransformedPoseSource rebuilt
+    the sample without it, so latency silently became NaN whenever a
+    calibration transform was in the path -- i.e. in every real HITL run, and
+    in none of the fake-room dry runs it was tested with.
+    """
+    from splat_hitl.frames import SplatTransform
+    from splat_hitl.runtime import (PoseSample, ScriptedPoseSource,
+                                    TransformedPoseSource)
+
+    tf = SplatTransform(R=np.eye(3), t=np.zeros(3), scale=2.0)
+    inner = ScriptedPoseSource([PoseSample(1.0, np.array([1.0, 2.0, 3.0]),
+                                           (0.0, 0.0, 0.0, 1.0),
+                                           capture_t_s=1234.5)])
+    inner.advance()
+    got = TransformedPoseSource(inner, tf).latest()
+    assert got.capture_t_s == 1234.5
+    assert got.t_s == 1.0
