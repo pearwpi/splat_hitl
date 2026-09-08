@@ -47,6 +47,7 @@ TERMINATION_MAP = {
 _CSV_FIELDS = ["t_s", "x_m", "y_m", "z_m", "yaw_deg", "state",
                "cmd_vx", "cmd_vy", "cmd_yaw_rate", "cmd_z",
                "clamped", "gates_passed", "pose_age_ms", "latency_ms",
+               "divergence_ms", "yaw_error_deg",
                "render_ms", "policy_ms", "tick_ms"]
 
 
@@ -62,11 +63,13 @@ class RunRecorder:
     def __init__(self, run_id: str, policy_name: str,
                  sensor_fingerprint: Optional[str] = None,
                  transform: Optional[Any] = None,
+                 contract_fingerprint: Optional[str] = None,
                  scene: Optional[str] = None,
                  extra: Optional[Dict[str, Any]] = None):
         self.run_id = run_id
         self.policy_name = policy_name
         self.sensor_fingerprint = sensor_fingerprint
+        self.contract_fingerprint = contract_fingerprint
         self.transform = transform
         self.scene = scene
         self.extra = dict(extra or {})
@@ -96,6 +99,15 @@ class RunRecorder:
                            else round(tick.pose_age_s * 1000.0, 2),
             "latency_ms": None if not math.isfinite(getattr(tick, "latency_s", float("nan")))
                           else round(tick.latency_s * 1000.0, 2),
+            # The gap between the velocity the policy believes it has (its own
+            # double integrator, as trained) and the one the drone actually
+            # has. This column IS the sim-to-real gap, per tick.
+            "divergence_ms": None if not math.isfinite(
+                getattr(tick, "divergence_ms", float("nan")))
+                else round(tick.divergence_ms, 4),
+            "yaw_error_deg": None if not math.isfinite(
+                getattr(tick, "yaw_error_rad", float("nan")))
+                else round(math.degrees(tick.yaw_error_rad), 2),
             "render_ms": round(tick.render_s * 1000.0, 2),
             "policy_ms": round(tick.policy_s * 1000.0, 2),
             "tick_ms": round(tick.total_s * 1000.0, 2),
@@ -137,6 +149,7 @@ class RunRecorder:
             "policy": self.policy_name,
             "scene": self.scene,
             "sensor_fingerprint": self.sensor_fingerprint,
+            "contract_fingerprint": self.contract_fingerprint,
             "termination": self.termination,
             "reason": self.reason,
             "steps": len(self.rows),

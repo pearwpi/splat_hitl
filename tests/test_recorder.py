@@ -199,3 +199,31 @@ def test_records_a_real_runtime_flight(tmp_path):
     rec.save_json(tmp_path / "r.json")
     rec.save_csv(tmp_path / "r.csv")
     assert (tmp_path / "r.json").exists() and (tmp_path / "r.csv").exists()
+
+
+def test_records_the_contract_and_the_divergence():
+    """The divergence column is the sim-to-real gap; it has to survive to disk."""
+    import csv as _csv
+    import math as _math
+    import tempfile
+    from pathlib import Path
+
+    from splat_hitl.recorder import RunRecorder
+    from splat_hitl.runtime import PoseSample, TickResult
+
+    rec = RunRecorder("t", "p", sensor_fingerprint="abc",
+                      contract_fingerprint="def456")
+    pose = PoseSample(0.0, np.array([0.0, 0.0, 0.6]), (0.0, 0.0, 0.0, 1.0))
+    rec.add(0.0, pose, TickResult("RUNNING", None, divergence_ms=0.25,
+                                  yaw_error_rad=_math.radians(3.0)))
+    rec.add(0.1, pose, TickResult("RUNNING", None))          # both NaN
+    rec.finish("operator_stop")
+
+    assert rec.to_dict()["contract_fingerprint"] == "def456"
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "run.csv"
+        rec.save_csv(p)
+        rows = list(_csv.DictReader(open(p)))
+    assert rows[0]["divergence_ms"] == "0.25"
+    assert rows[0]["yaw_error_deg"] == "3.0"
+    assert rows[1]["divergence_ms"] == ""      # NaN must not become a number

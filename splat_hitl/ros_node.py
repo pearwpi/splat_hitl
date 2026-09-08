@@ -47,6 +47,7 @@ from .recorder import RunRecorder
 from .renderer import FakeRenderer, SplatWorkerClient
 from .runtime import (FINISHED, PoseSample, PoseSource, Runtime, RuntimeConfig,
                       TransformedPoseSource)
+from .contract import PolicyContract
 from .sensor import SensorModel
 
 
@@ -124,7 +125,14 @@ def main(argv=None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--topic", required=True)
     ap.add_argument("--prefix", default="/cf1", help="Crazyflie command namespace")
-    ap.add_argument("--sensor", required=True)
+    ap.add_argument("--sensor", default=None,
+                    help="sensor model JSON. Omit when --contract is given: "
+                         "the contract carries its own sensor and loading two "
+                         "is how they drift apart.")
+    ap.add_argument("--contract", default=None,
+                    help="policy contract JSON (config/policy_contract.example"
+                         ".json). Required to fly a policy that emits "
+                         "accelerations or expects a stacked depth history.")
     ap.add_argument("--transform", default=None,
                     help="vicon_to_splat.json; omit only for a fake-room dry run")
     ap.add_argument("--gates", default=None)
@@ -147,7 +155,27 @@ def main(argv=None) -> int:
     from rclpy.node import Node
     from crazyflie_interfaces.msg import Hover
 
-    sensor = SensorModel.load(a.sensor)
+    contract = PolicyContract.load(a.contract) if a.contract else None
+    if contract is not None:
+        if a.sensor:
+            raise SystemExit(
+                "--sensor and --contract both given. The contract carries its "
+                "own sensor model; loading a second one is exactly how the two "
+                "drift apart. Drop --sensor.")
+        sensor = contract.observation.sensor
+        want = contract.control.rate_hz
+        if a.rate_hz is not None and abs(a.rate_hz - want) > 1e-9:
+            raise SystemExit(
+                "--rate-hz %.3f disagrees with the contract's %.3f Hz.\n"
+                "A policy that integrates its own action carries its timestep "
+                "inside its behaviour: running it faster does not make it "
+                "smoother, it makes it faster. Drop --rate-hz, or fly a "
+                "contract that says %.3f." % (a.rate_hz, want, a.rate_hz))
+        a.rate_hz = want
+    elif a.sensor:
+        sensor = SensorModel.load(a.sensor)
+    else:
+        raise SystemExit("need --sensor or --contract")
     transform = SplatTransform.load(a.transform) if a.transform else None
     course = GateCourse.load(a.gates) if a.gates else None
     monitor = None
@@ -171,10 +199,13 @@ def main(argv=None) -> int:
         raise SystemExit("--worker without --transform would render the wrong "
                          "part of the scene; supply the calibration")
 
-    cfg = RuntimeConfig(hold_altitude_m=a.hold_altitude_m, yaw_sign=a.yaw_sign)
+    cfg = RuntimeConfig(hold_altitude_m=a.hold_altitude_m, yaw_sign=a.yaw_sign,
+                        contract=contract)
     rt = Runtime(source, renderer, load_policy(a.policy), course, monitor, cfg)
     rec = RunRecorder(time.strftime("%Y%m%d-%H%M%S"), rt.policy.name,
-                      sensor.fingerprint(), transform)
+                      sensor.fingerprint(), transform,
+                      contract_fingerprint=None if contract is None
+                      else contract.fingerprint())
     pub = node.create_publisher(Hover, "%s/cmd_hover" % a.prefix.rstrip("/"), 10)
     if monitor:
         for w in monitor.warnings:

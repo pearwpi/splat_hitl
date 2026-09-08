@@ -53,11 +53,20 @@ _CAM_TO_BODY = np.array([[0.0, 0.0, 1.0],
 
 @dataclass(frozen=True)
 class Observation:
-    """One rendered view. `depth_m` is always METRES, whatever produced it."""
+    """One rendered view. `depth_m` is always METRES, whatever produced it.
+
+    `policy_input` is what a CONTRACTED policy actually reads: depth clipped,
+    normalised and stacked into a history by `ObservationBuilder`, exactly as
+    the trainer did it. It is None when no contract is in force, which is why
+    the reference policies read `depth_m` and a trained one must read
+    `policy_input` -- and get a clear failure rather than a subtly wrong image
+    if it is missing.
+    """
     depth_m: np.ndarray
     rgb: Optional[np.ndarray]
     render_s: float
     sensor_fingerprint: str
+    policy_input: Optional[np.ndarray] = None
 
     @property
     def shape(self) -> tuple:

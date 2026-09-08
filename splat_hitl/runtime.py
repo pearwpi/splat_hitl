@@ -40,13 +40,16 @@ from __future__ import annotations
 import math
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 
 from .collision import CollisionMonitor
-from .commands import Action, Clamped, HoverCommand, Limits, to_hover
+from .commands import (Action, Clamped, HoverCommand, Limits,
+                       VelocityIntegrator, to_hover)
+from .contract import PolicyContract
+from .observation import ObservationBuilder
 from .frames import matrix_to_quat, matrix_to_rpy, quat_to_matrix
 from .gates import GateCourse
 from .policy import Policy, PolicyState
@@ -181,6 +184,23 @@ class RuntimeConfig:
     enforce_sensor_match: bool = True
     #: a pose further than this into the future means the clocks disagree
     max_clock_skew_s: float = 1.0
+    #: the full train/fly contract. None keeps the pre-contract behaviour:
+    #: raw metric depth to the policy and no integrator.
+    contract: Optional[PolicyContract] = None
+    #: with contract.action.yaw_mode == "fixed" the policy has only ever seen
+    #: the scene from its starting heading, so drift past this makes every
+    #: observation invalid and the runtime stops using the policy.
+    max_yaw_drift_rad: float = math.radians(20.0)
+    #: optional proportional hold on that heading. 0 = report drift, correct
+    #: nothing; a controller nobody asked for is worse than a number nobody
+    #: ignores.
+    hold_yaw_gain: float = 0.0
+    #: fraction the MEASURED step rate may differ from contract.control before
+    #: the run is refused. A double integrator at the wrong rate is silently
+    #: wrong, so this is checked against the clock rather than against config.
+    rate_tolerance: float = 0.20
+    #: steps to measure before that check fires
+    rate_check_after: int = 30
 
 
 @dataclass
@@ -195,6 +215,10 @@ class TickResult:
     policy_s: float = 0.0
     total_s: float = 0.0
     reason: Optional[str] = None
+    #: |open-loop velocity - measured velocity|, the sim-to-real gap per tick
+    divergence_ms: float = float("nan")
+    #: heading drift from the episode heading the policy assumes
+    yaw_error_rad: float = float("nan")
 
     @property
     def finished(self) -> bool:
@@ -216,6 +240,31 @@ class Runtime:
                     "renderer is configured as %s. It has never seen this "
                     "world. Fix the sensor config rather than the policy."
                     % (policy.name, policy.sensor_fingerprint, want))
+
+        self.builder: Optional[ObservationBuilder] = None
+        self.integrator: Optional[VelocityIntegrator] = None
+        c = config.contract
+        if c is not None:
+            # The renderer must be configured as the contract describes, or the
+            # observation builder is encoding an image the policy never saw.
+            if c.observation.sensor.fingerprint() != renderer.sensor.fingerprint():
+                raise ValueError(
+                    "the contract's sensor (%s) is not the renderer's (%s).\n"
+                    "Load one sensor model, not two."
+                    % (c.observation.sensor.fingerprint(),
+                       renderer.sensor.fingerprint()))
+            declared = getattr(policy, "contract_fingerprint", None)
+            if config.enforce_sensor_match and declared is not None \
+                    and declared != c.fingerprint():
+                raise ValueError(
+                    "policy %r declares contract %s but this run is configured "
+                    "as %s. Compare the two files rather than guessing which "
+                    "field moved." % (policy.name, declared, c.fingerprint()))
+            self.builder = ObservationBuilder(c.observation)
+            if c.action.kind == "acceleration":
+                self.integrator = VelocityIntegrator(
+                    c.action, c.control.dt_s, config.limits,
+                    hold_yaw_gain=config.hold_yaw_gain)
         self.poses = pose_source
         self.renderer = renderer
         self.policy = policy
@@ -233,6 +282,13 @@ class Runtime:
         self.hold_started: Optional[float] = None
         self.prev: Optional[PoseSample] = None
         self.history: List[TickResult] = []
+        #: heading captured from the first pose. With yaw_mode="fixed" this is
+        #: the ONLY heading the policy has ever seen the scene from.
+        self.episode_yaw_rad: Optional[float] = None
+        self._step_times: List[float] = []
+        self._rate_checked = False
+        if self.builder is not None:
+            self.builder.reset()
         self.policy.reset()
         if self.course is not None:
             self.course.reset()
@@ -272,6 +328,7 @@ class Runtime:
         t_start = time.perf_counter()
         now = time.monotonic() if now is None else float(now)
         now_wall = time.time()
+        self._step_times.append(now)
         if self.t0 is None:
             self.t0 = now
         events: List[str] = []
@@ -360,12 +417,65 @@ class Runtime:
             self.hold_started = None
             events.append("recovered")
 
+        # --- the contract, if there is one -----------------------------------
+        if self.episode_yaw_rad is None:
+            # Captured from the FIRST pose of the run, not from config: with
+            # yaw_mode="fixed" this is the heading the policy will assume for
+            # the whole flight, so it has to be where the drone actually is.
+            self.episode_yaw_rad = float(pose.yaw_rad)
+            if self.integrator is not None:
+                self.integrator.reset(self.episode_yaw_rad)
+                events.append("episode heading %.1f deg"
+                              % math.degrees(self.episode_yaw_rad))
+
+        yaw_err = float(pose.yaw_rad) - self.episode_yaw_rad
+        yaw_err = (yaw_err + math.pi) % (2 * math.pi) - math.pi
+
+        c = self.cfg.contract
+        if c is not None and not self._rate_checked \
+                and len(self._step_times) > self.cfg.rate_check_after:
+            gaps = sorted(self._step_times[i] - self._step_times[i - 1]
+                          for i in range(1, len(self._step_times)))
+            measured = gaps[len(gaps) // 2]
+            want = c.control.dt_s
+            self._rate_checked = True
+            if measured > 0 and abs(measured - want) / want > self.cfg.rate_tolerance:
+                events.append(
+                    "measured step rate %.1f Hz, contract says %.1f Hz. A "
+                    "policy that integrates its own action carries its "
+                    "timestep inside its behaviour, so running it at a "
+                    "different rate does not make it smoother -- it makes it "
+                    "faster." % (1.0 / measured, c.control.rate_hz))
+                return self._finish("rate_mismatch", events)
+
+        if c is not None and c.action.yaw_mode == "fixed" \
+                and abs(yaw_err) > self.cfg.max_yaw_drift_rad:
+            # Every degree of drift points the camera somewhere this policy has
+            # never looked. Hold rather than land: holding is recoverable, and
+            # continuing to act on invalid observations is not.
+            events.append("yaw drifted %.1f deg from the episode heading; the "
+                          "policy's observations are no longer valid"
+                          % math.degrees(yaw_err))
+            self.state = HOLDING
+            self.hold_started = now
+            cmd, rep = self._hold_command(self.cfg.hold_altitude_m)
+            return self._record(TickResult(
+                HOLDING, cmd, rep, events, age, latency,
+                total_s=time.perf_counter() - t_start, yaw_error_rad=yaw_err))
+
         # --- render ---------------------------------------------------------
         try:
             obs = self.renderer.render(pose.position_m, pose.rpy)
         except Exception as exc:
             events.append("render failed: %r" % (exc,))
             return self._finish("render_error", events)
+
+        if self.builder is not None:
+            try:
+                obs = replace(obs, policy_input=self.builder.push(obs.depth_m))
+            except Exception as exc:
+                events.append("observation encoding failed: %r" % (exc,))
+                return self._finish("observation_error", events)
 
         # --- policy ---------------------------------------------------------
         dist, bearing, passed = self._gate_state(pose)
@@ -387,6 +497,19 @@ class Runtime:
             events.append("policy returned a non-finite action")
             return self._finish("policy_error", events)
 
+        divergence = float("nan")
+        if self.integrator is not None:
+            try:
+                action, ireport = self.integrator.step(
+                    action, current_yaw_rad=float(pose.yaw_rad),
+                    measured_velocity_world=vel)
+            except Exception as exc:
+                events.append("integrator refused the action: %s" % exc)
+                return self._finish("action_error", events)
+            divergence = ireport.divergence_ms
+            if ireport.state_saturated:
+                events.append("integrator state saturated")
+
         try:
             cmd, rep = to_hover(action, pose.yaw_rad, self.cfg.hold_altitude_m,
                                 self.cfg.limits, self.cfg.yaw_sign)
@@ -407,7 +530,9 @@ class Runtime:
         self.prev = pose
         self.steps += 1
         return self._record(TickResult(RUNNING, cmd, rep, events, age, latency,
-                                       obs.render_s, policy_s, total))
+                                       obs.render_s, policy_s, total,
+                                       divergence_ms=divergence,
+                                       yaw_error_rad=yaw_err))
 
     def _record(self, r: TickResult) -> TickResult:
         self.history.append(r)
