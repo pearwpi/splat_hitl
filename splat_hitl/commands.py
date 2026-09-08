@@ -51,7 +51,7 @@ from .frames import rpy_to_matrix
 __all__ = [
     "Action", "Limits", "Clamped", "HoverCommand", "VelocityWorldCommand",
     "PositionCommand", "to_hover", "to_velocity_world", "to_position",
-    "to_world_enu",
+    "to_world_enu", "VelocityIntegrator", "IntegratorReport", "action_from_raw",
 ]
 
 # kinds a policy can emit
@@ -201,6 +201,194 @@ def _reject_acceleration(action: Action, what: str) -> None:
             "call site, where dt is known, and pass a velocity Action. Doing it "
             "silently here would hide the integrator that actually determines "
             "how the drone behaves." % what)
+
+
+# ------------------------------------------------------- the integrator
+@dataclass
+class IntegratorReport:
+    """What the integrator did, so the sim-to-real gap is visible per tick.
+
+    `divergence_ms` is the whole point of carrying both velocities: it is the
+    distance between what the policy THINKS its velocity is (the double
+    integrator it was trained with) and what the drone is ACTUALLY doing. It
+    starts near zero and grows with drag, thrust error and wind. Logged every
+    tick, it is the sim-to-real gap plotted against time instead of argued
+    about.
+    """
+    velocity_world_open_loop: np.ndarray
+    velocity_world_measured: Optional[np.ndarray]
+    divergence_ms: float
+    mode: str
+    yaw_error_rad: float
+    state_saturated: bool
+
+    def __str__(self) -> str:
+        d = "n/a" if math.isnan(self.divergence_ms) else "%.3f m/s" % self.divergence_ms
+        return ("integrator[%s] |v|=%.3f m/s, divergence %s, yaw err %+.1f deg%s"
+                % (self.mode, float(np.linalg.norm(self.velocity_world_open_loop)),
+                   d, math.degrees(self.yaw_error_rad),
+                   ", STATE SATURATED" if self.state_saturated else ""))
+
+
+def _wrap_pi(a: float) -> float:
+    return (float(a) + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def action_from_raw(spec, raw, yaw_rate_rad_s: float = 0.0) -> Action:
+    """A policy network's raw output -> a physical Action, per the contract.
+
+    Reproduces the trainer exactly:
+
+        action = np.clip(action, -1.0, 1.0)
+        acceleration_body = action * max_acceleration_m_s2
+        if ||acceleration_body|| > max: rescale to max
+
+    Note the last step is a NORM limit, not a per-axis clip. (1, 1, 1) scaled by
+    1.5 has norm 2.6, and the trainer pulls it back to 1.5. Clipping per axis
+    instead would leave the diagonal 73% too fast, which is a bias a policy
+    trained under the norm limit never had to correct for.
+    """
+    v = np.asarray(raw, dtype=float).reshape(-1)
+    if v.shape != (3,):
+        raise ValueError("raw action must have 3 components, got %s" % (v.shape,))
+    if spec.clip_unit:
+        v = np.clip(v, -1.0, 1.0)
+    v = v * float(spec.scale)
+    if spec.limit_norm:
+        n = float(np.linalg.norm(v))
+        if n > float(spec.scale) and n > 0.0:
+            v = v * (float(spec.scale) / n)
+    return Action(kind=spec.kind, frame=spec.frame, vector=v,
+                  yaw_rate_rad_s=float(yaw_rate_rad_s))
+
+
+class VelocityIntegrator:
+    """Acceleration action -> velocity Action, with the integrator made explicit.
+
+    `to_hover` refuses an acceleration on purpose, and that refusal stays: the
+    integrator is what actually decides how the drone behaves, so it is an
+    object you construct and reset rather than a hidden conversion. This is the
+    thing the refusal message tells you to build.
+
+    THE FRAME IS THE PARITY-CRITICAL PART
+    -------------------------------------
+    The trainer captures `episode_basis` at reset and NEVER updates it, and
+    holds `yaw_policy_rad = 0.0`. So its "body frame" is the heading the
+    episode started at, frozen, and its velocity state lives in the scene
+    frame. With `yaw_mode="fixed"` this reproduces that: body-frame
+    accelerations are rotated by the EPISODE yaw, not the current yaw, and the
+    emitted yaw rate is forced to zero.
+
+    That also means the drone must actually hold that heading. It will drift,
+    and every degree of drift points the camera somewhere the policy has never
+    looked, so `yaw_error_rad` is reported every tick for the runtime to act
+    on. No yaw correction is applied here by default (`hold_yaw_gain=0`),
+    because a controller nobody asked for is worse than a number nobody
+    ignores. Set a gain if you want the heading actively held.
+
+    WHY THE STATE IS CLAMPED, NOT JUST THE OUTPUT
+    ---------------------------------------------
+    `Limits` clamps the command. If the internal velocity were left unclamped,
+    a policy that keeps asking for +x would wind the state up to 10 m/s while
+    the output sat at 1.5, and when it finally commanded a reversal nothing
+    would happen for several seconds. That is textbook integrator windup with a
+    drone attached, so the state is clamped by the same envelope.
+    """
+
+    def __init__(self, spec, dt_s: float, limits: Limits = Limits(),
+                 hold_yaw_gain: float = 0.0):
+        if spec.kind != "acceleration":
+            raise ValueError("VelocityIntegrator is for acceleration actions; "
+                             "this contract emits %r, which needs no "
+                             "integrator." % (spec.kind,))
+        if not dt_s > 0:
+            raise ValueError("dt_s must be positive, got %r" % (dt_s,))
+        if hold_yaw_gain < 0:
+            raise ValueError("hold_yaw_gain must be >= 0")
+        self.spec = spec
+        self.dt_s = float(dt_s)
+        self.limits = limits
+        self.hold_yaw_gain = float(hold_yaw_gain)
+        self.episode_yaw_rad = 0.0
+        self.velocity_world = np.zeros(3, dtype=float)
+        self._started = False
+
+    def reset(self, episode_yaw_rad: float, velocity_world=(0.0, 0.0, 0.0)) -> None:
+        """Start a run. `episode_yaw_rad` is the heading the policy will assume."""
+        if not math.isfinite(episode_yaw_rad):
+            raise ValueError("episode_yaw_rad is not finite")
+        self.episode_yaw_rad = float(episode_yaw_rad)
+        v = np.asarray(velocity_world, dtype=float).reshape(-1)
+        if v.shape != (3,):
+            raise ValueError("velocity_world must have 3 components")
+        self.velocity_world = v.copy()
+        self._started = True
+
+    def yaw_error_rad(self, current_yaw_rad: float) -> float:
+        """How far the drone has drifted from the heading the policy assumes."""
+        return _wrap_pi(float(current_yaw_rad) - self.episode_yaw_rad)
+
+    def _clamp_state(self, v: np.ndarray):
+        out = v.copy()
+        hit = False
+        speed = float(math.hypot(out[0], out[1]))
+        if speed > self.limits.max_speed_ms:
+            out[0] *= self.limits.max_speed_ms / speed
+            out[1] *= self.limits.max_speed_ms / speed
+            hit = True
+        if abs(out[2]) > self.limits.max_climb_ms:
+            out[2] = math.copysign(self.limits.max_climb_ms, out[2])
+            hit = True
+        return out, hit
+
+    def step(self, action: Action, current_yaw_rad: float,
+             measured_velocity_world=None) -> Tuple[Action, IntegratorReport]:
+        """One control step. Returns a WORLD-ENU velocity Action and a report."""
+        if not self._started:
+            raise RuntimeError(
+                "VelocityIntegrator.step() before reset(). Without a reset the "
+                "run inherits the previous run's velocity and heading, which "
+                "is a silently wrong flight rather than a failed one.")
+        if action.kind != "acceleration":
+            raise ValueError("expected an acceleration action, got %r" % (action.kind,))
+
+        yaw_for_frame = (self.episode_yaw_rad if self.spec.yaw_mode == "fixed"
+                         else float(current_yaw_rad))
+        accel_world = to_world_enu(action, yaw_for_frame)
+
+        open_loop, hit = self._clamp_state(self.velocity_world + accel_world * self.dt_s)
+        self.velocity_world = open_loop
+
+        measured = None
+        divergence = float("nan")
+        if measured_velocity_world is not None:
+            m = np.asarray(measured_velocity_world, dtype=float).reshape(-1)
+            if m.shape != (3,):
+                raise ValueError("measured_velocity_world must have 3 components")
+            measured, _ = self._clamp_state(m + accel_world * self.dt_s)
+            divergence = float(np.linalg.norm(open_loop - measured))
+
+        if self.spec.integrator == "measured":
+            if measured is None:
+                raise ValueError(
+                    "integrator='measured' needs measured_velocity_world every "
+                    "step. Falling back to the open-loop value would quietly "
+                    "change which controller is flying the drone.")
+            emitted = measured
+        else:
+            emitted = open_loop
+
+        err = self.yaw_error_rad(current_yaw_rad)
+        if self.spec.yaw_mode == "fixed":
+            yaw_rate = -self.hold_yaw_gain * err
+        else:
+            yaw_rate = action.yaw_rate_rad_s
+
+        out = Action(kind="velocity", frame="world_enu", vector=emitted,
+                     yaw_rate_rad_s=float(yaw_rate))
+        return out, IntegratorReport(open_loop.copy(),
+                                     None if measured is None else measured.copy(),
+                                     divergence, self.spec.integrator, err, hit)
 
 
 # ------------------------------------------------------------------ commands

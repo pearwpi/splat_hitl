@@ -1,0 +1,60 @@
+{
+  "name": "metric_splat_depth_ppo_v1.EXAMPLE",
+  "observation": {
+    "sensor": {
+      "name": "metric_splat_depth_ppo_v1.EXAMPLE",
+      "width": 96,
+      "height": 64,
+      "fov_x_deg": 93.6,
+      "mount_pitch_deg": 0.0,
+      "mount_yaw_deg": 0.0,
+      "stereo_baseline_m": null,
+      "depth": {
+        "kind": "metric",
+        "near_m": 0.05,
+        "far_m": 4.0,
+        "empty_depth_m": 4.0
+      },
+      "rate_hz": 15.0,
+      "notes": "empty_depth_m matches the worker's --empty-depth-raw-m 4.0",
+      "_comment": "fov_x_deg IS PER SCENE. The render worker only uses an explicit fov_x_half_tan if one is sent; otherwise it falls back to the capture camera's intrinsics, so the policy's field of view is a property of the recording. Get the real number with: python3 -m splat_hitl.contract <scene>_nerfstudio/.../transforms.json"
+    },
+    "clip_far_m": 4.0,
+    "normalize": "clip_unit",
+    "history": 4,
+    "history_order": "oldest_first",
+    "prime": "repeat_first",
+    "nan_fill_m": 4.0,
+    "neginf_fill_m": 0.0
+  },
+  "action": {
+    "kind": "acceleration",
+    "frame": "body_flu",
+    "scale": 1.5,
+    "clip_unit": true,
+    "limit_norm": true,
+    "yaw_mode": "fixed",
+    "integrator": "open_loop",
+    "_comment": "yaw_mode='fixed' is not a preference. splat_rl_env captures episode_basis at reset, never updates it, and holds yaw_policy_rad = 0.0 -- the policy has never seen the scene from any heading but its starting one."
+  },
+  "control": {
+    "rate_hz": 15.0,
+    "_comment": "15 Hz because control_dt_s = 1/15 in SplatEnvConfig. A double integrator run at 30 Hz produces twice the velocity per unit time, silently."
+  },
+  "trainer_action_semantics": "body_acceleration_fraction_double_integrator_v1",
+  "trainer_observation_semantics": "metric_depth_clipped_4m_normalized_history4_v1",
+  "notes": "EXAMPLE ONLY -- fov_x_deg below is a placeholder. Replace it per scene before flying anything.",
+  "fingerprint": "35c1e0593973",
+  "derived": {
+    "observation_shape": [
+      4,
+      64,
+      96
+    ],
+    "fov_x_half_tan": 1.0648918403247916,
+    "fov_y_deg": 70.74400998933848,
+    "control_dt_s": 0.06666666666666667,
+    "sensor_fingerprint": "0381c91b84ad"
+  },
+  "_comment": "The contract a policy assumes. Training and flight must load the SAME file; comparing `fingerprint` answers 'has this policy ever run under these conditions?' in one step. Generated from splat_hitl.contract.metric_splat_depth_ppo_v1(), which mirrors splat_rl_env.py as of 2026-09-08."
+}
