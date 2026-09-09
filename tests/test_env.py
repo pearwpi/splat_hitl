@@ -235,9 +235,12 @@ def test_env_and_runtime_agree():
         rt_vel.append(rt.integrator.velocity_world.copy())
 
     # observation at the same position must be byte-identical
-    assert np.array_equal(pol.inputs[0], env.builder.encode_frame(
-        rt.renderer.render(positions[0], (0.0, 0.0, yaw)).depth_m)[None]
-        .repeat(c.observation.history, axis=0))
+    # encode_frame now returns (channels_per_frame, H, W), so priming the
+    # history is a repeat along the channel axis rather than a new one
+    first = env.builder.encode_frame(
+        rt.renderer.render(positions[0], (0.0, 0.0, yaw)).depth_m)
+    assert np.array_equal(pol.inputs[0],
+                          np.repeat(first, c.observation.history, axis=0))
     for k in range(n):
         assert np.array_equal(pol.inputs[k + 1], env_obs[k]), k
 

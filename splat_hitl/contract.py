@@ -52,6 +52,14 @@ __all__ = ["ObservationSpec", "ActionSpec", "ControlSpec", "PolicyContract",
            "fov_x_deg_from_transforms", "metric_splat_depth_ppo_v1"]
 
 NORMALIZATIONS = ("none", "clip_unit")
+#: What the policy actually reads. Per FRAME the channels are ordered
+#: [R, G, B, D] with whichever of those the choice includes, and frames stack
+#: along the channel axis in `history_order`. So depth-only with history 4 is
+#: (4, H, W) -- unchanged -- and rgb+depth with history 4 is (16, H, W) laid
+#: out R0 G0 B0 D0 R1 G1 B1 D1 ... Interleaving per frame rather than grouping
+#: all the colour first keeps a single frame contiguous, which is what a
+#: network that also runs on ONE frame expects.
+CHANNELS = {"depth": 1, "rgb": 3, "rgb_depth": 4}
 YAW_MODES = ("fixed", "free")
 INTEGRATORS = ("open_loop", "measured")
 _HISTORY_ORDERS = ("oldest_first", "newest_first")
@@ -78,6 +86,16 @@ class ObservationSpec:
     nan_fill_m       NaN and +inf become this many metres. The trainer uses the
                      clip distance: an unknown pixel reads as "far".
     neginf_fill_m    -inf becomes this. The trainer uses 0.0, i.e. "touching".
+    channels         "depth", "rgb" or "rgb_depth". A depth-only policy cannot
+                     see a painted gate and a colour policy cannot see how far
+                     away it is, so this is the first thing to get right for an
+                     assignment, not a detail.
+    rgb_range_max    what the renderer's colour channels top out at. Divide by
+                     it to reach [0, 1]. gsplat hands back floats in [0, 1], so
+                     1.0; a renderer returning bytes wants 255.0. Getting this
+                     wrong makes every image either black or saturated, which
+                     at least fails loudly -- unlike most of what this file
+                     guards against.
     """
     sensor: SensorModel
     clip_far_m: Optional[float] = None
@@ -87,8 +105,15 @@ class ObservationSpec:
     prime: str = "repeat_first"
     nan_fill_m: Optional[float] = None
     neginf_fill_m: float = 0.0
+    channels: str = "depth"
+    rgb_range_max: float = 1.0
 
     def __post_init__(self):
+        if self.channels not in CHANNELS:
+            raise ValueError("channels %r not in %s"
+                             % (self.channels, tuple(CHANNELS)))
+        if not self.rgb_range_max > 0:
+            raise ValueError("rgb_range_max must be positive")
         if self.normalize not in NORMALIZATIONS:
             raise ValueError("normalize %r not in %s" % (self.normalize, NORMALIZATIONS))
         if self.history_order not in _HISTORY_ORDERS:
@@ -100,14 +125,28 @@ class ObservationSpec:
             raise ValueError("history must be >= 1, got %r" % (self.history,))
         if self.clip_far_m is not None and not self.clip_far_m > 0:
             raise ValueError("clip_far_m must be positive or None")
-        if self.normalize == "clip_unit" and self.clip_far_m is None:
-            raise ValueError("normalize='clip_unit' divides by clip_far_m, so "
-                             "clip_far_m must be set")
+        if self.normalize == "clip_unit" and self.clip_far_m is None \
+                and self.wants_depth:
+            raise ValueError("normalize='clip_unit' divides depth by "
+                             "clip_far_m, so clip_far_m must be set")
+
+    @property
+    def channels_per_frame(self) -> int:
+        return CHANNELS[self.channels]
+
+    @property
+    def wants_rgb(self) -> bool:
+        return self.channels in ("rgb", "rgb_depth")
+
+    @property
+    def wants_depth(self) -> bool:
+        return self.channels in ("depth", "rgb_depth")
 
     @property
     def shape(self) -> tuple:
         """(channels, height, width) as the policy receives it."""
-        return (int(self.history), int(self.sensor.height), int(self.sensor.width))
+        return (int(self.history) * self.channels_per_frame,
+                int(self.sensor.height), int(self.sensor.width))
 
     @property
     def fov_x_half_tan(self) -> float:

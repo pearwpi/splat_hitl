@@ -239,7 +239,7 @@ class SplatEnv:
         # would show the policy an attitude the HITL renderer never will.
         obs = self.renderer.render(self.position_m,
                                    (0.0, 0.0, self.integrator.episode_yaw_rad))
-        return self.builder.push(obs.depth_m)
+        return self.builder.push(obs.depth_m, obs.rgb)
 
     def _info(self, reason: Optional[str]) -> Dict[str, Any]:
         return {

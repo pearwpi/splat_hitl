@@ -61,8 +61,17 @@ seen, while every component still reports healthy.
 ```python
 print(contract)
 # PolicyContract(playTunnels, obs 4x64x96 clip_unit clip 4.0,
-#                act acceleration body_flu x1.50 yaw=fixed, 15 Hz, 3e251866f7ca)
+#                act acceleration body_flu x1.50 yaw=fixed, 15 Hz, 4b7684afaa70)
 ```
+
+**Pick your channels first.** `observation.channels` is `depth`, `rgb` or
+`rgb_depth`, and it is the single most consequential line in the file for an
+assignment: a depth-only policy cannot see a painted gate, and a colour-only
+one cannot tell how far away it is. Per frame the channels are ordered
+`[R, G, B, D]` and frames stack along the channel axis, so a 4-frame
+`rgb_depth` observation is `(16, H, W)` laid out `R0 G0 B0 D0 R1 G1 B1 D1 ...`
+— one frame stays contiguous, so a network that also runs on a single frame
+can slice it out.
 
 Three parts of that are easy to miss and expensive to get wrong:
 
@@ -87,15 +96,31 @@ Declare the contract on your policy and the runtime will check it:
 ```python
 class MyPolicy(Policy):
     name = "gate_racer_v3"
-    contract_fingerprint = "3e251866f7ca"   # from contract.fingerprint()
+    contract_fingerprint = "4b7684afaa70"   # from contract.fingerprint()
 
     def act(self, obs, state):
-        a = self.net(obs.policy_input)      # (4, 64, 96) float32 in [0, 1]
+        a = self.net(obs.policy_input)      # (C, H, W) float32 in [0, 1]
         return action_from_raw(CONTRACT.action, a)
 ```
 
 `obs.policy_input` is the encoded, stacked observation. `obs.depth_m` is raw
-metres, which is *not* what you trained on.
+metres and `obs.rgb` is the raw colour image — neither is what you trained on,
+so read `policy_input` unless you are debugging.
+
+Developing a colour policy does not need a GPU. `FakeRenderer` shades its six
+walls and every obstacle differently, and an obstacle can carry its own colour,
+so a coloured sphere stands in for the landmark you intend to detect:
+
+```python
+FakeRenderer(sensor, (4.0, 3.0, 2.5),
+             obstacles=[{"centre": (2.0, 1.5, 0.6), "radius": 0.3,
+                         "colour": (1.0, 0.0, 0.0)}])
+```
+
+That is enough to check your loop is wired up — the shapes move correctly and
+the colours are consistent between frames. It is **not** enough to train a
+perception network on: flat colours, exact labels, no texture, no lighting, no
+noise. Train on real or Blender-rendered imagery and use this for the plumbing.
 
 ---
 

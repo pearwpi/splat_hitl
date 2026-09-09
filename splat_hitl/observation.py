@@ -56,22 +56,15 @@ class ObservationBuilder:
         return len(self._hist) == self._hist.maxlen
 
     # -- the conversion ---------------------------------------------------
-    def encode_frame(self, depth_m: np.ndarray) -> np.ndarray:
-        """One metric depth image -> one normalised float32 frame.
-
-        Separate from `push` so it can be tested, and so a caller that wants
-        the single-frame view for logging or display can get it without
-        disturbing the history.
-        """
+    def _encode_depth(self, depth_m: np.ndarray) -> np.ndarray:
         s = self.spec
         d = np.asarray(depth_m, dtype=np.float64)
         if d.shape != (s.sensor.height, s.sensor.width):
             raise ValueError(
-                "renderer returned %s but the contract says %s (h, w).\n"
+                "renderer returned depth %s but the contract says %s (h, w).\n"
                 "A policy trained at one resolution has not seen the other; "
                 "resizing here would hide that, so it is refused."
                 % (d.shape, (s.sensor.height, s.sensor.width)))
-
         nan_fill = s.clip_far_m if s.nan_fill_m is None else s.nan_fill_m
         if nan_fill is None:
             nan_fill = float(s.sensor.depth.far_m)
@@ -81,11 +74,54 @@ class ObservationBuilder:
             d = np.clip(d, 0.0, float(s.clip_far_m))
         if s.normalize == "clip_unit":
             d = d / float(s.clip_far_m)
-        return d.astype(np.float32)
+        return d.astype(np.float32)[None]                    # (1, H, W)
 
-    def push(self, depth_m: np.ndarray) -> np.ndarray:
+    def _encode_rgb(self, rgb: np.ndarray) -> np.ndarray:
+        """(H, W, 3) from the renderer -> (3, H, W) in [0, 1].
+
+        Channels-last in, channels-first out, because every renderer hands back
+        an image and every network wants a tensor. Doing it here rather than at
+        the call site means there is one place for the transpose to be wrong.
+        """
+        s = self.spec
+        c = np.asarray(rgb, dtype=np.float64)
+        want = (s.sensor.height, s.sensor.width, 3)
+        if c.shape != want:
+            raise ValueError(
+                "renderer returned rgb %s but the contract says %s (h, w, 3)."
+                % (c.shape, want))
+        c = np.nan_to_num(c, nan=0.0, posinf=float(s.rgb_range_max), neginf=0.0)
+        c = np.clip(c / float(s.rgb_range_max), 0.0, 1.0)
+        return np.ascontiguousarray(c.transpose(2, 0, 1)).astype(np.float32)
+
+    def encode_frame(self, depth_m=None, rgb=None) -> np.ndarray:
+        """One render -> one frame, (channels_per_frame, H, W) float32.
+
+        Channel order within a frame is [R, G, B, D], whichever of those the
+        contract asks for. Separate from `push` so it can be tested, and so a
+        caller wanting the single-frame view for logging or display can have it
+        without disturbing the history.
+        """
+        s = self.spec
+        parts = []
+        if s.wants_rgb:
+            if rgb is None:
+                raise ValueError(
+                    "the contract asks for %r but the renderer returned no "
+                    "colour. FakeRenderer produces RGB; a splat worker only "
+                    "does if it was started with an RGB backend."
+                    % (s.channels,))
+            parts.append(self._encode_rgb(rgb))
+        if s.wants_depth:
+            if depth_m is None:
+                raise ValueError("the contract asks for %r but no depth was "
+                                 "supplied" % (s.channels,))
+            parts.append(self._encode_depth(depth_m))
+        return np.concatenate(parts, axis=0)
+
+    def push(self, depth_m=None, rgb=None) -> np.ndarray:
         """Add a frame and return the stacked observation, (C, H, W) float32."""
-        frame = self.encode_frame(depth_m)
+        frame = self.encode_frame(depth_m, rgb)
         if not self._hist:
             if self.spec.prime == "repeat_first":
                 for _ in range(self._hist.maxlen):
@@ -100,7 +136,10 @@ class ObservationBuilder:
         frames = list(self._hist)
         if self.spec.history_order == "newest_first":
             frames = frames[::-1]
-        obs = np.stack(frames, axis=0).astype(np.float32)
+        # concatenate, not stack: each frame is already (C_per_frame, H, W), so
+        # the history lands on the channel axis and a depth-only contract keeps
+        # exactly the (history, H, W) it has always had.
+        obs = np.concatenate(frames, axis=0).astype(np.float32)
         if obs.shape != self.spec.shape:
             raise AssertionError("built %s, contract says %s"
                                  % (obs.shape, self.spec.shape))

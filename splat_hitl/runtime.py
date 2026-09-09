@@ -472,7 +472,9 @@ class Runtime:
 
         if self.builder is not None:
             try:
-                obs = replace(obs, policy_input=self.builder.push(obs.depth_m))
+                obs = replace(obs,
+                              policy_input=self.builder.push(obs.depth_m,
+                                                            obs.rgb))
             except Exception as exc:
                 events.append("observation encoding failed: %r" % (exc,))
                 return self._finish("observation_error", events)

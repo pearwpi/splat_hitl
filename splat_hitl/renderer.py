@@ -122,7 +122,30 @@ class FakeRenderer(RendererClient):
     Returns RANGE along each ray, not perpendicular z-depth. Stated because
     renderers differ and the difference is a few percent at the edges of a wide
     field of view.
+
+    IT ALSO RENDERS COLOUR, flat per surface: the six walls get six distinct
+    colours and each obstacle gets its own. That is enough to develop a
+    segmentation or optical-flow loop end to end -- the shapes move correctly,
+    the colours are consistent between frames -- without a GPU or a scene.
+
+    It is NOT enough to TRAIN a perception network on. The colours are flat,
+    the labels are exact and there is no texture, lighting or noise, so a
+    network fitted here learns a problem that does not exist. Train on real or
+    Blender-rendered imagery; use this to check that your loop is wired up.
     """
+
+    #: index 0 is "hit nothing", 1..6 are the six walls in the order
+    #: x-, x+, y-, y+, z- (floor), z+ (ceiling), then obstacles.
+    PALETTE = np.array([
+        [0.00, 0.00, 0.00],
+        [0.75, 0.25, 0.25], [0.25, 0.55, 0.85],
+        [0.85, 0.65, 0.20], [0.35, 0.70, 0.35],
+        [0.45, 0.45, 0.50], [0.90, 0.90, 0.88],
+    ], dtype=np.float32)
+    OBSTACLE_COLOURS = np.array([
+        [0.85, 0.35, 0.75], [0.30, 0.80, 0.80], [0.95, 0.55, 0.15],
+        [0.55, 0.35, 0.85], [0.20, 0.85, 0.45],
+    ], dtype=np.float32)
 
     def __init__(self, sensor: SensorModel, room_size_m=(4.0, 3.0, 2.5),
                  obstacles: Sequence[dict] = (), far_m: float = 24.0):
@@ -132,6 +155,16 @@ class FakeRenderer(RendererClient):
             (np.asarray(o["centre"], dtype=float).reshape(3), float(o["radius"]))
             for o in obstacles
         ]
+        # An obstacle may name its own colour, so a coloured sphere can stand in
+        # for a landmark you intend to detect.
+        colours = [self.OBSTACLE_COLOURS[i % len(self.OBSTACLE_COLOURS)]
+                   for i in range(len(self.obstacles))]
+        for i, o in enumerate(obstacles):
+            if o.get("colour") is not None:
+                colours[i] = np.asarray(o["colour"], dtype=np.float32).reshape(3)
+        self.palette = (np.vstack([self.PALETTE] + [np.asarray(colours,
+                                                               dtype=np.float32)])
+                        if colours else self.PALETTE.copy())
         self.far_m = float(far_m)
         self.scale_to_metres = 1.0
         self._dirs_cam = self._pixel_rays()
@@ -162,9 +195,16 @@ class FakeRenderer(RendererClient):
         t_exit = np.maximum(t_lo, t_hi)
         t_exit = np.where(np.isnan(t_exit), np.inf, t_exit)
         depth = np.min(t_exit, axis=-1)
+
+        # Which of the six faces the ray leaves through: the axis that
+        # constrains it, and the sign of the ray along that axis.
+        axis = np.argmin(t_exit, axis=-1)
+        along = np.take_along_axis(dirs, axis[..., None], axis=-1)[..., 0]
+        surface = 1 + axis * 2 + (along > 0).astype(np.int64)
+        surface = np.where(depth > 0, surface, 0)
         depth = np.where(depth > 0, depth, self.far_m)
 
-        for c, r in self.obstacles:
+        for i, (c, r) in enumerate(self.obstacles):
             oc = p - c
             b = 2.0 * np.einsum("ijk,k->ij", dirs, oc)
             cc = float(np.dot(oc, oc)) - r * r
@@ -176,10 +216,13 @@ class FakeRenderer(RendererClient):
             t1 = (-b - sq) / 2.0
             t2 = (-b + sq) / 2.0
             t = np.where(t1 > 1e-6, t1, np.where(t2 > 1e-6, t2, np.inf))
-            depth = np.minimum(depth, np.where(hit, t, np.inf))
+            t = np.where(hit, t, np.inf)
+            surface = np.where(t < depth, len(self.PALETTE) + i, surface)
+            depth = np.minimum(depth, t)
 
         depth = np.clip(depth, 0.0, self.far_m).astype(np.float32)
-        return Observation(depth, None, time.perf_counter() - t0,
+        rgb = self.palette[np.clip(surface, 0, len(self.palette) - 1)]
+        return Observation(depth, rgb, time.perf_counter() - t0,
                            self.sensor.fingerprint())
 
 
