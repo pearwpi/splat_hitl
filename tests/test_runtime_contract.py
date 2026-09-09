@@ -5,14 +5,11 @@ integrator existed, a policy trained by `splat_rl_env.py` raised inside
 `to_hover` on its first tick and could not be flown at all.
 """
 import math
-import os
-import sys
 
 import numpy as np
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from splat_hitl.commands import Action, action_from_raw
+from splat_hitl.commands import action_from_raw
 from splat_hitl.contract import (ActionSpec, ControlSpec, ObservationSpec,
                                  PolicyContract, metric_splat_depth_ppo_v1)
 from splat_hitl.policy import HoverPolicy, Policy

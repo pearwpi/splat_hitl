@@ -53,7 +53,7 @@ from .observation import ObservationBuilder
 from .frames import matrix_to_quat, matrix_to_rpy, quat_to_matrix
 from .gates import GateCourse
 from .policy import Policy, PolicyState
-from .renderer import Observation, RendererClient
+from .renderer import RendererClient
 
 __all__ = ["PoseSample", "PoseSource", "ScriptedPoseSource",
            "TransformedPoseSource", "RuntimeConfig", "TickResult", "Runtime",

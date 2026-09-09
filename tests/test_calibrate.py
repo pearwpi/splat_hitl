@@ -1,13 +1,10 @@
 """Calibration tests. The ROS capture is not exercised; everything around it is."""
+
 import json
 import math
-import os
+import numpy as np
 import sys
 
-import numpy as np
-import pytest
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from splat_hitl.calibrate import (is_occluded_sentinel, pair_by_label,
                                   solve_files, summarise_burst)
 

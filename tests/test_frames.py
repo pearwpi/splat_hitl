@@ -6,13 +6,10 @@ laptop.
 """
 import json
 import math
-import os
-import sys
 
 import numpy as np
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from splat_hitl.frames import (SplatTransform, enu_to_ned, matrix_to_quat,
                                matrix_to_rpy, ned_to_enu, quat_to_matrix,

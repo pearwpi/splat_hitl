@@ -5,13 +5,10 @@ are written as physical statements: "commanded forward while facing north, the
 drone must go north".
 """
 import math
-import os
-import sys
 
 import numpy as np
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from splat_hitl.commands import (Action, Clamped, Limits, to_hover,
                                  to_position, to_velocity_world, to_world_enu)
 

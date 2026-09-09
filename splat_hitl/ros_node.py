@@ -45,7 +45,7 @@ from .gates import GateCourse
 from .policy import GateSeekPolicy, HoverPolicy, Policy
 from .recorder import RunRecorder
 from .renderer import FakeRenderer, SplatWorkerClient
-from .runtime import (FINISHED, PoseSample, PoseSource, Runtime, RuntimeConfig,
+from .runtime import (PoseSample, PoseSource, Runtime, RuntimeConfig,
                       TransformedPoseSource)
 from .contract import PolicyContract
 from .sensor import SensorModel

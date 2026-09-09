@@ -5,15 +5,13 @@ own. They are the quiet ones: an ESDF built from a different export than the
 splat, a gate outside the mapped volume, a manifest edited without the file it
 describes.
 """
+
 import hashlib
 import json
-import os
-import sys
-
 import numpy as np
+import os
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from splat_hitl.bundle import MANIFEST_NAME, SceneBundle
 from splat_hitl.contract import metric_splat_depth_ppo_v1
 from splat_hitl.frames import SplatTransform

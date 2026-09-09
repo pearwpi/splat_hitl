@@ -5,13 +5,10 @@ impossible to produce deliberately in a lab: a renderer that throws mid-flight,
 a policy that returns NaN, a pose feed that goes stale at altitude.
 """
 import math
-import os
-import sys
 
 import numpy as np
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from splat_hitl.collision import CollisionMonitor, synthetic_room
 from splat_hitl.commands import Action
 from splat_hitl.gates import Gate, GateCourse
@@ -296,7 +293,7 @@ def test_reset_clears_everything():
 
 # ------------------------------------------------- scene-frame pose source
 def test_transformed_pose_source_converts_position_and_orientation():
-    from splat_hitl.frames import SplatTransform, rpy_to_matrix, matrix_to_quat
+    from splat_hitl.frames import SplatTransform, rpy_to_matrix
     from splat_hitl.runtime import TransformedPoseSource
     R = rpy_to_matrix(0, 0, math.pi / 2)              # scene yawed 90 deg
     tf = SplatTransform(R, np.array([1.0, 0.0, 0.0]), 2.0)

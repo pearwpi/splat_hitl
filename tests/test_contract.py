@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from splat_hitl.commands import (Action, Limits, VelocityIntegrator,
+from splat_hitl.commands import (Limits, VelocityIntegrator,
                                  action_from_raw, to_hover)
 from splat_hitl.contract import (ActionSpec, ControlSpec, ObservationSpec,
                                  PolicyContract, metric_splat_depth_ppo_v1)

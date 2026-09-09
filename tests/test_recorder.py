@@ -1,19 +1,16 @@
 import csv
 import json
 import math
-import os
-import sys
 
 import numpy as np
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from splat_hitl.collision import CollisionMonitor, synthetic_room
 from splat_hitl.commands import Clamped, HoverCommand
 from splat_hitl.frames import SplatTransform
 from splat_hitl.gates import Gate, GateCourse
 from splat_hitl.policy import GateSeekPolicy
-from splat_hitl.recorder import TERMINATION_MAP, RunRecorder
+from splat_hitl.recorder import RunRecorder
 from splat_hitl.renderer import FakeRenderer
 from splat_hitl.runtime import (PoseSample, Runtime, RuntimeConfig,
                                 ScriptedPoseSource, TickResult)

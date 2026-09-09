@@ -6,13 +6,10 @@ and the drone is asked for the same velocity. If that ever fails, sim-to-real
 parity has been broken by an edit, not discovered on a drone.
 """
 import math
-import os
-import sys
 
 import numpy as np
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from splat_hitl.collision import synthetic_room
 from splat_hitl.commands import Limits, action_from_raw
 from splat_hitl.contract import (ActionSpec, ControlSpec, ObservationSpec,

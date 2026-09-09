@@ -4,15 +4,11 @@ Assignments 3 and 4 -- gate segmentation and optical flow through an unknown
 gap -- cannot be expressed at all without these. A depth-only policy cannot see
 a painted gate, and optical flow is a visual method.
 """
-import math
-import os
-import sys
 
 import numpy as np
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from splat_hitl.contract import (ActionSpec, ControlSpec, ObservationSpec,
+from splat_hitl.contract import (ControlSpec, ObservationSpec,
                                  PolicyContract, metric_splat_depth_ppo_v1)
 from splat_hitl.env import EnvConfig, SplatEnv
 from splat_hitl.gates import Gate, GateCourse

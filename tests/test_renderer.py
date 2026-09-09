@@ -1,13 +1,10 @@
 """Renderer tests. The fake is checked against geometry we can compute by hand."""
 import math
-import os
-import sys
 
 import numpy as np
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from splat_hitl.renderer import FakeRenderer, Observation, RendererClient
+from splat_hitl.renderer import FakeRenderer, RendererClient
 from splat_hitl.sensor import SensorModel
 
 

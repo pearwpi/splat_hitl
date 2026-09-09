@@ -1,13 +1,10 @@
 """Gate tests, written as flight situations rather than as assertions on maths."""
 import json
 import math
-import os
-import sys
 
 import numpy as np
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from splat_hitl.gates import (MISSED, PASSED, WRONG_WAY, Gate, GateCourse)
 
 

@@ -31,8 +31,6 @@ from run N-1.
 from __future__ import annotations
 
 from collections import deque
-from typing import Optional
-
 import numpy as np
 
 from .contract import ObservationSpec

@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "splat_hitl"
+version = "0.1.0"
+description = "Train a policy in a metric Gaussian splat, then fly it hardware-in-the-loop on a Crazyflie."
+readme = "README.md"
+requires-python = ">=3.9"
+
+# numpy is the ONLY hard dependency, deliberately. This package has to import
+# on the flight machine, where a missing RL library at 2 a.m. in the lab is a
+# wasted session. rclpy, gymnasium and crazyflie_interfaces are all imported
+# lazily inside the functions that need them.
+dependencies = ["numpy>=1.20"]
+
+[project.optional-dependencies]
+train = ["gymnasium>=0.29"]          # only for SplatEnv.as_gym()
+dev = ["pytest>=7"]
+
+[tool.setuptools]
+packages = ["splat_hitl"]
+
+[tool.setuptools.package-data]
+splat_hitl = ["../config/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]        # pycodestyle, pyflakes, import order
