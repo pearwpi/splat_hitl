@@ -436,3 +436,71 @@ def test_transformed_source_preserves_capture_time():
     got = TransformedPoseSource(inner, tf).latest()
     assert got.capture_t_s == 1234.5
     assert got.t_s == 1.0
+
+
+# ------------------------------------------------- the velocity time base
+# `t_s` is a receipt time and `capture_t_s` is when the cameras saw the drone.
+# Differencing position over the first turns arrival jitter into velocity
+# error, and divergence_ms -- the sim-to-real number the course rests on -- is
+# computed against that velocity.
+def test_interval_prefers_capture_time_when_both_carry_it():
+    a = PoseSample(100.000, np.zeros(3), LEVEL, capture_t_s=1.788e9)
+    b = PoseSample(100.080, np.zeros(3), LEVEL, capture_t_s=1.788e9 + 0.0667)
+    # receipt says 80 ms, the cameras say 66.7 -- 13 ms of arrival jitter
+    assert b.interval_since(a) == pytest.approx(0.0667)
+
+
+def test_interval_falls_back_to_receipt_time():
+    a = PoseSample(100.0, np.zeros(3), LEVEL)
+    b = PoseSample(100.0667, np.zeros(3), LEVEL)
+    assert b.interval_since(a) == pytest.approx(0.0667)
+
+    # one side missing a capture time is not enough: the two clocks have
+    # different epochs and differencing across them is meaningless.
+    c = PoseSample(100.0667, np.zeros(3), LEVEL, capture_t_s=1.788e9)
+    assert c.interval_since(a) == pytest.approx(0.0667)
+    assert c.interval_since(a) > 0
+
+
+def test_interval_never_mixes_the_two_clocks():
+    """The failure this guards: monotonic minus epoch is about -1.8e9 s."""
+    a = PoseSample(100.0, np.zeros(3), LEVEL)                     # receipt only
+    b = PoseSample(100.0667, np.zeros(3), LEVEL, capture_t_s=1.788e9)
+    assert abs(b.interval_since(a)) < 1.0
+
+
+def test_interval_ignores_a_non_advancing_capture_clock():
+    """A repeated capture stamp (the bridge held a frame) must not divide by
+    zero -- fall back to receipt time rather than producing an infinity."""
+    a = PoseSample(100.0, np.zeros(3), LEVEL, capture_t_s=1.788e9)
+    b = PoseSample(100.0667, np.zeros(3), LEVEL, capture_t_s=1.788e9)
+    assert b.interval_since(a) == pytest.approx(0.0667)
+
+
+def test_policy_velocity_uses_capture_time():
+    """End to end: the number the policy reads is on the physical clock."""
+    seen = {}
+
+    class Recorder(Policy):
+        name = "rec"
+
+        def act(self, obs, state):
+            seen["vel"] = np.asarray(state.velocity_ms, float).copy()
+            return Action(kind="velocity", frame="world_enu",
+                          vector=np.zeros(3))
+
+    # 0.10 m of travel. Receipt times are 80 ms apart, capture times 50 ms:
+    # 1.25 m/s on the real clock, 2.0 m/s if the receipt clock is used.
+    samples = [
+        PoseSample(10.00, np.array([1.0, 1.5, 0.6]), LEVEL, capture_t_s=1.788e9),
+        PoseSample(10.08, np.array([1.1, 1.5, 0.6]), LEVEL,
+                   capture_t_s=1.788e9 + 0.05),
+    ]
+    rt = Runtime(ScriptedPoseSource(samples),
+                 FakeRenderer(SENSOR, ROOM), Recorder(),
+                 config=RuntimeConfig(max_duration_s=1e6,
+                                      rate_check_after=10 ** 6))
+    for i in range(2):
+        rt.poses.advance()
+        rt.step(now=10.0 + 0.08 * i)
+    assert seen["vel"][0] == pytest.approx(2.0, rel=1e-6)   # 0.10 / 0.05

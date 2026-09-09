@@ -4,8 +4,8 @@ import math
 import numpy as np
 import pytest
 
-from splat_hitl.collision import (Clearance, CollisionMonitor, ESDF,
-                                  synthetic_room)
+from splat_hitl.collision import (AIRFRAME_RADIUS_M, Clearance,
+                                  CollisionMonitor, ESDF, synthetic_room)
 
 
 def room(**kw):
@@ -213,3 +213,44 @@ def test_synthetic_room_is_analytically_right():
 def test_repr_is_informative():
     r = repr(room())
     assert "voxels" in r and "truncated" in r
+
+
+# ------------------------------------------------ what margin fits this field
+# The shipped scenes were built with truncation 0.10 m, which refuses the
+# 0.10 m default. The refusal is right -- at the cap every free voxel reads the
+# same and nothing would ever fail -- but it used to leave you without a number
+# to type instead.
+def _field(voxel, truncation):
+    grid = np.full((8, 8, 8), truncation, dtype=float)
+    return ESDF(grid, voxel_size=voxel, origin=(0.0, 0.0, 0.0),
+                truncation=truncation)
+
+
+def test_max_clearance_is_one_voxel_below_the_truncation():
+    e = _field(0.01, 0.10)
+    assert e.max_clearance_m == pytest.approx(0.09)
+    CollisionMonitor(e, e.max_clearance_m)                 # must be accepted
+    with pytest.raises(ValueError):
+        CollisionMonitor(e, e.truncation_m)                # ...and the cap not
+
+
+def test_max_clearance_is_zero_when_the_field_admits_none():
+    """Truncation under two voxels leaves no value that both resolves and
+    discriminates."""
+    assert _field(0.06, 0.10).max_clearance_m == 0.0
+
+
+def test_the_refusals_name_a_usable_number():
+    e = _field(0.01, 0.10)
+    with pytest.raises(ValueError, match=r"largest clearance this field can "
+                                         r"express is 0\.090"):
+        CollisionMonitor(e, 0.10)
+    with pytest.raises(ValueError, match=r"supports 10 to 90 mm"):
+        CollisionMonitor(e, 0.005)
+
+
+def test_a_generous_truncation_allows_an_airframe_sized_margin():
+    """0.30-0.50 m is what the message recommends; check it delivers."""
+    e = _field(0.02, 0.40)
+    assert e.max_clearance_m >= AIRFRAME_RADIUS_M
+    CollisionMonitor(e, 0.15)

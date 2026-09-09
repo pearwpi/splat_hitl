@@ -94,6 +94,32 @@ class PoseSample:
     def rpy(self) -> np.ndarray:
         return matrix_to_rpy(quat_to_matrix(*self.quat_xyzw))
 
+    def interval_since(self, prev: "PoseSample") -> float:
+        """Seconds between two samples, on the best clock both of them carry.
+
+        `t_s` is a RECEIPT time, so the gap between two of them is the true
+        interval plus whatever jitter the network and the executor added. That
+        is the right clock for staleness -- a watchdog must measure how long it
+        has been since something arrived -- and the wrong one for a derivative:
+        dividing a real position delta by a jittered interval turns arrival
+        jitter into velocity error.
+
+        `capture_t_s` is when the cameras actually saw the drone, so the gap
+        between two of them is the physical interval. Roughly 2 ms of arrival
+        jitter across a 67 ms control step is a 3% velocity error, which at
+        racing speed is tens of millimetres per second on a number the whole
+        sim-to-real comparison rests on.
+
+        The two clocks are never mixed: capture times are epoch, receipt times
+        are monotonic, and differencing one against the other gives about
+        -1.8e9 s. Both samples must carry a capture time or neither is used.
+        """
+        if self.capture_t_s is not None and prev.capture_t_s is not None:
+            dt = float(self.capture_t_s) - float(prev.capture_t_s)
+            if dt > 0.0:
+                return dt
+        return float(self.t_s) - float(prev.t_s)
+
 
 class PoseSource(ABC):
     """Where the drone's pose comes from.
@@ -487,8 +513,10 @@ class Runtime:
         # --- policy ---------------------------------------------------------
         dist, bearing, passed = self._gate_state(pose)
         vel = np.zeros(3)
-        if self.prev is not None and pose.t_s > self.prev.t_s:
-            vel = (pose.position_m - self.prev.position_m) / (pose.t_s - self.prev.t_s)
+        if self.prev is not None:
+            dt_v = pose.interval_since(self.prev)
+            if dt_v > 0.0:
+                vel = (pose.position_m - self.prev.position_m) / dt_v
         pstate = PolicyState(now - self.t0, pose.position_m, vel, pose.yaw_rad,
                              passed, dist, bearing)
         t_pol = time.perf_counter()

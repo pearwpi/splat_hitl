@@ -36,7 +36,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-from .collision import ESDF
+from .collision import AIRFRAME_RADIUS_M, ESDF
 from .contract import PolicyContract
 from .frames import SplatTransform
 from .gates import GateCourse
@@ -191,12 +191,30 @@ class SceneBundle:
                 "manifest says contract %s, the file is %s. Someone edited one "
                 "without the other." % (claimed, contract.fingerprint()))
 
-        # -- clearance against the voxel size --------------------------------
+        # -- what margin can this field actually express? --------------------
+        # Answered here, at scene-check time, rather than by a refusal from
+        # CollisionMonitor when the student is already at the drone.
+        usable = esdf.max_clearance_m
+        if usable <= 0.0:
+            r.errors.append(
+                "the ESDF admits no usable clearance: truncation %.3f m is not "
+                "at least two voxels (%.0f mm). Rebuild it with a larger "
+                "truncation." % (esdf.truncation_m, esdf.voxel_size_m * 1000))
+        elif usable < AIRFRAME_RADIUS_M:
+            r.warnings.append(
+                "the largest clearance this ESDF can express is %.0f mm, under "
+                "the %.0f mm airframe radius -- a passing collision check does "
+                "not mean the propellers cleared. Rebuild with a truncation of "
+                "0.30-0.50 m."
+                % (usable * 1000, AIRFRAME_RADIUS_M * 1000))
+
         if clearance_m < esdf.voxel_size_m:
             r.errors.append(
                 "clearance %.0f mm is finer than the ESDF voxel (%.0f mm); the "
-                "collision check cannot resolve it"
-                % (clearance_m * 1000, esdf.voxel_size_m * 1000))
+                "collision check cannot resolve it. This field supports "
+                "%.0f to %.0f mm."
+                % (clearance_m * 1000, esdf.voxel_size_m * 1000,
+                   esdf.voxel_size_m * 1000, usable * 1000))
         elif clearance_m < 2.0 * esdf.voxel_size_m:
             r.warnings.append(
                 "clearance %.0f mm is under two voxels (%.0f mm); "
@@ -204,9 +222,10 @@ class SceneBundle:
                 % (clearance_m * 1000, esdf.voxel_size_m * 1000))
         if clearance_m >= esdf.truncation_m:
             r.errors.append(
-                "clearance %.2f m is at or past the truncation (%.2f m), so "
-                "nothing would ever fail the check"
-                % (clearance_m, esdf.truncation_m))
+                "clearance %.3f m is at or past the truncation (%.3f m), so "
+                "nothing would ever fail the check. The largest this field can "
+                "express is %.3f m."
+                % (clearance_m, esdf.truncation_m, usable))
 
         # -- do the gates lie in the mapped volume? --------------------------
         lo, hi = esdf.bounds_m

@@ -66,6 +66,15 @@ class Clearance:
         return "%s%.3f m" % (">=" if self.truncated else "", self.metres)
 
 
+#: Half the Crazyflie 2.1+ motor-to-motor diagonal (~65 mm) plus a little for
+#: the propeller arc. `clearance_m` is measured from the drone's CENTRE, so a
+#: clearance below this passes the check while the airframe is already inside
+#: the surface. It is a sanity floor for judging an ESDF, not a limit anything
+#: enforces -- a smaller margin is a legitimate choice you should make on
+#: purpose.
+AIRFRAME_RADIUS_M = 0.075
+
+
 class ESDF:
     """Euclidean distance field over a scene, queried in metres."""
 
@@ -94,6 +103,22 @@ class ESDF:
     @property
     def truncation_m(self) -> float:
         return self.truncation * self.metres_per_unit
+
+    @property
+    def max_clearance_m(self) -> float:
+        """The largest clearance this field can both resolve and discriminate.
+
+        A usable clearance must sit at or above one voxel (nearest-voxel lookup
+        cannot resolve anything finer) and strictly below the truncation (at or
+        past it, every free voxel reads as the cap and nothing ever fails). So
+        the usable range is [voxel_size_m, truncation_m), and the largest
+        practical value is one voxel below the cap.
+
+        Returns 0.0 when the field admits no usable clearance at all, which
+        happens when the truncation is not at least two voxels.
+        """
+        top = self.truncation_m - self.voxel_size_m
+        return float(top) if top >= self.voxel_size_m else 0.0
 
     @property
     def bounds_m(self) -> Tuple[np.ndarray, np.ndarray]:
@@ -190,14 +215,20 @@ class CollisionMonitor:
             raise ValueError(
                 "clearance %.0f mm is finer than the ESDF voxel (%.0f mm). "
                 "Nearest-voxel lookup cannot resolve it, so the check would "
-                "return confident nonsense. Rebuild the ESDF with "
-                "--voxel-size-m at or below the clearance."
-                % (clearance_m * 1000, esdf.voxel_size_m * 1000))
+                "return confident nonsense.\n"
+                "This field supports %.0f to %.0f mm; below that, rebuild it "
+                "with a smaller --voxel-size-m."
+                % (clearance_m * 1000, esdf.voxel_size_m * 1000,
+                   esdf.voxel_size_m * 1000, esdf.max_clearance_m * 1000))
         if clearance_m >= esdf.truncation_m:
             raise ValueError(
-                "clearance %.2f m is at or beyond the truncation (%.2f m). "
-                "Every free voxel reads as the cap, so nothing would ever fail."
-                % (clearance_m, esdf.truncation_m))
+                "clearance %.3f m is at or beyond the truncation (%.3f m). "
+                "Every free voxel reads as the cap, so nothing would ever "
+                "fail.\n"
+                "The largest clearance this field can express is %.3f m. For a "
+                "bigger margin, rebuild the ESDF with a larger truncation -- "
+                "0.30 to 0.50 m leaves room to choose."
+                % (clearance_m, esdf.truncation_m, esdf.max_clearance_m))
         self.esdf = esdf
         self.clearance_m = float(clearance_m)
         self.outside_is_failure = bool(outside_is_failure)
