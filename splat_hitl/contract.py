@@ -177,8 +177,8 @@ class ActionSpec:
                 `yaw_policy_rad` is hard 0. The policy has therefore never seen
                 the scene from any heading but the one it started at. Flying it
                 with a free yaw shows it a world it was not trained in.
-    integrator  only meaningful for kind="acceleration". See
-                commands.VelocityIntegrator.
+    integrator  only meaningful for kind="acceleration"; must be "open_loop"
+                otherwise. See commands.VelocityIntegrator.
     """
     kind: str = "velocity"
     frame: str = "body_flu"
@@ -200,8 +200,13 @@ class ActionSpec:
             raise ValueError("integrator %r not in %s" % (self.integrator, INTEGRATORS))
         if not self.scale > 0:
             raise ValueError("scale must be positive, got %r" % (self.scale,))
-        if self.kind == "position" and self.integrator != "open_loop":
-            raise ValueError("integrator is meaningless for a position action")
+        if self.kind != "acceleration" and self.integrator != "open_loop":
+            # Only an acceleration action has an integrator to choose. Letting
+            # a velocity contract carry integrator="measured" would put a
+            # field in the fingerprint that changes nothing about how the
+            # policy flies -- two identical policies with different hashes.
+            raise ValueError("integrator is only meaningful for an "
+                             "acceleration action; %r has none" % (self.kind,))
 
 
 @dataclass(frozen=True)

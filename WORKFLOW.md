@@ -55,8 +55,24 @@ seen, while every component still reports healthy.
 
 - **observation** — resolution, field of view, mount angle, depth clip,
   normalisation, and **how many frames are stacked**
-- **action** — kind (`acceleration`), frame, scale, and `yaw_mode`
+- **action** — kind, frame, scale, and `yaw_mode`
 - **control** — the rate, in hertz
+
+**`action.kind` decides what your three numbers mean**, and it is the second
+thing to get right after `channels`:
+
+| kind | your policy emits | what sits behind it |
+|---|---|---|
+| `acceleration` | a change in velocity | a double integrator that carries the velocity as state — the RL default |
+| `velocity` | the velocity you want | nothing; the number is the command |
+
+Write the outer position controller yourself and you want `velocity`: your PID
+already decides what speed to ask for, so an integrator behind it would be a
+second one you did not tune. Train a network end to end and you want
+`acceleration`, which is what `metric_splat_depth_ppo_v1` gives you.
+
+Both end at the same clamped world-ENU velocity, through the same code, in sim
+and in flight. So gains tuned in `SplatEnv` are the gains you fly.
 
 ```python
 print(contract)
@@ -151,6 +167,18 @@ scaling and the norm limit happen inside, so you are training against exactly
 the interpretation the drone will apply. (The norm limit is not per-axis
 clipping: `(1, 1, 1)` is pulled back to the action scale, so the diagonal is
 not faster than forward.)
+
+A hand-written controller uses the same box. Divide by `action.scale` and the
+envelope is applied for you:
+
+```python
+env = SplatEnv(velocity_contract, renderer, course, esdf, cfg)
+obs, info = env.reset(seed=0)
+for _ in range(500):
+    err = target_m - info["position_m"]          # your controller's input
+    cmd = kp * err / velocity_contract.action.scale
+    obs, r, term, trunc, info = env.step(cmd)    # cmd is clipped to [-1, 1]
+```
 
 With stable-baselines3:
 

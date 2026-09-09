@@ -9,8 +9,11 @@ import math
 import numpy as np
 import pytest
 
-from splat_hitl.commands import (Action, Clamped, Limits, to_hover,
-                                 to_position, to_velocity_world, to_world_enu)
+from splat_hitl.commands import (Action, Clamped, Limits, VelocityIntegrator,
+                                 VelocityPassthrough, make_action_stage,
+                                 to_hover, to_position, to_velocity_world,
+                                 to_world_enu)
+from splat_hitl.contract import ActionSpec
 
 N = math.pi / 2          # facing north (ENU +y) when yaw is +90 deg
 FWD = np.array([1.0, 0.0, 0.0])
@@ -234,3 +237,90 @@ def test_yaw_sign_accepts_the_float_spellings(ok):
     a = Action("velocity", "body_flu", FWD, yaw_rate_rad_s=0.5)
     cmd, _ = to_hover(a, 0.0, 0.6, Limits(), ok)
     assert math.isclose(cmd.yaw_rate, ok * 0.5)
+
+
+# ------------------------------------------------------- velocity passthrough
+def _vel_spec(**kw):
+    kw.setdefault("kind", "velocity")
+    kw.setdefault("frame", "body_flu")
+    kw.setdefault("yaw_mode", "fixed")
+    return ActionSpec(**kw)
+
+
+def test_passthrough_refuses_an_acceleration_spec():
+    with pytest.raises(ValueError, match="needs VelocityIntegrator"):
+        VelocityPassthrough(ActionSpec(kind="acceleration"), 0.1)
+
+
+def test_passthrough_refuses_an_acceleration_action():
+    p = VelocityPassthrough(_vel_spec(), 0.1)
+    p.reset(0.0)
+    with pytest.raises(ValueError, match="expected a velocity action"):
+        p.step(Action(kind="acceleration", frame="body_flu",
+                      vector=np.array([1.0, 0.0, 0.0])), current_yaw_rad=0.0)
+
+
+def test_passthrough_refuses_to_step_before_reset():
+    p = VelocityPassthrough(_vel_spec(), 0.1)
+    with pytest.raises(RuntimeError, match="before reset"):
+        p.step(Action(kind="velocity", frame="body_flu",
+                      vector=np.array([1.0, 0.0, 0.0])), current_yaw_rad=0.0)
+
+
+def test_passthrough_does_not_accumulate():
+    """The property that separates it from the integrator."""
+    p = VelocityPassthrough(_vel_spec(), 0.1, Limits(max_speed_ms=9.0))
+    p.reset(0.0)
+    a = Action(kind="velocity", frame="world_enu", vector=np.array([1.0, 0.0, 0.0]))
+    for _ in range(10):
+        out, _ = p.step(a, current_yaw_rad=0.0)
+    assert np.allclose(out.vector, [1.0, 0.0, 0.0])
+
+
+def test_passthrough_clamps_state_and_reports_it():
+    p = VelocityPassthrough(_vel_spec(), 0.1,
+                            Limits(max_speed_ms=0.5, max_climb_ms=0.25))
+    p.reset(0.0)
+    out, rep = p.step(Action(kind="velocity", frame="world_enu",
+                             vector=np.array([3.0, 4.0, 2.0])),
+                      current_yaw_rad=0.0)
+    assert rep.state_saturated
+    assert math.hypot(out.vector[0], out.vector[1]) == pytest.approx(0.5)
+    assert out.vector[2] == pytest.approx(0.25)
+
+
+def test_passthrough_rotates_body_into_world():
+    p = VelocityPassthrough(_vel_spec(), 0.1, Limits(max_speed_ms=9.0))
+    p.reset(math.pi / 2.0)
+    out, _ = p.step(Action(kind="velocity", frame="body_flu",
+                           vector=np.array([1.0, 0.0, 0.0])),
+                    current_yaw_rad=math.pi / 2.0)
+    assert out.frame == "world_enu"
+    assert out.vector[0] == pytest.approx(0.0, abs=1e-12)
+    assert out.vector[1] == pytest.approx(1.0)
+
+
+def test_passthrough_divergence_is_commanded_minus_measured():
+    p = VelocityPassthrough(_vel_spec(), 0.1, Limits(max_speed_ms=9.0))
+    p.reset(0.0)
+    a = Action(kind="velocity", frame="world_enu", vector=np.array([1.0, 0.0, 0.0]))
+    _, rep = p.step(a, current_yaw_rad=0.0)
+    assert math.isnan(rep.divergence_ms)          # nothing measured
+    _, rep = p.step(a, current_yaw_rad=0.0,
+                    measured_velocity_world=(0.7, 0.0, 0.0))
+    assert rep.divergence_ms == pytest.approx(0.3)
+    assert rep.mode == "passthrough"
+
+
+def test_passthrough_reports_yaw_error_against_the_episode_heading():
+    p = VelocityPassthrough(_vel_spec(), 0.1)
+    p.reset(0.0)
+    assert math.degrees(p.yaw_error_rad(math.radians(30.0))) == pytest.approx(30.0)
+
+
+def test_make_action_stage_picks_by_kind():
+    assert isinstance(make_action_stage(ActionSpec(kind="acceleration"), 0.1),
+                      VelocityIntegrator)
+    assert isinstance(make_action_stage(_vel_spec(), 0.1), VelocityPassthrough)
+    with pytest.raises(ValueError, match="commands a place"):
+        make_action_stage(ActionSpec(kind="position", frame="world_enu"), 0.1)

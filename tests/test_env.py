@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 from splat_hitl.collision import synthetic_room
-from splat_hitl.commands import Limits, action_from_raw
+from splat_hitl.commands import Limits, action_from_raw, make_action_stage
 from splat_hitl.contract import (ActionSpec, ControlSpec, ObservationSpec,
                                  PolicyContract, metric_splat_depth_ppo_v1)
 from splat_hitl.env import (COURSE_COMPLETE, MAX_DURATION, VIRTUAL_COLLISION,
@@ -62,13 +62,112 @@ def test_sensor_must_match_the_renderer():
         SplatEnv(c, FakeRenderer(other, ROOM), course())
 
 
-def test_a_velocity_contract_is_refused():
+def test_a_position_contract_is_refused():
     c = contract()
-    vel = PolicyContract(name="v", observation=c.observation,
-                         action=ActionSpec(kind="velocity", frame="body_flu"),
+    pos = PolicyContract(name="p", observation=c.observation,
+                         action=ActionSpec(kind="position", frame="world_enu"),
                          control=c.control)
-    with pytest.raises(ValueError, match="needs no integrator"):
-        SplatEnv(vel, FakeRenderer(c.observation.sensor, ROOM), course())
+    with pytest.raises(ValueError, match="needs a tracking controller"):
+        SplatEnv(pos, FakeRenderer(c.observation.sensor, ROOM), course())
+
+
+# ------------------------------------------------------- velocity contracts
+# Assignment 2 has students write the outer position controller themselves,
+# so what their code emits is a velocity, not an acceleration. These pin the
+# behaviour that makes tuning it in sim mean anything.
+def velocity_contract(rate_hz=15.0, scale=1.0, yaw_mode="fixed",
+                      frame="body_flu"):
+    c = contract(rate_hz)
+    return PolicyContract(
+        name="pid", observation=c.observation,
+        action=ActionSpec(kind="velocity", frame=frame, scale=scale,
+                          yaw_mode=yaw_mode),
+        control=c.control)
+
+
+def test_a_velocity_contract_is_accepted_and_needs_no_integrator():
+    c = velocity_contract()
+    env = make(c)
+    obs, _ = env.reset(seed=0)
+    assert obs.shape == env.observation_shape
+    assert env.integrator.__class__.__name__ == "VelocityPassthrough"
+
+
+def test_velocity_command_is_the_velocity_no_integration():
+    """The defining difference: hold the stick and the speed does NOT build."""
+    env = make(velocity_contract(scale=1.0))
+    env.reset(seed=0)
+    speeds = []
+    for _ in range(5):
+        env.step(np.array([0.5, 0.0, 0.0]))
+        speeds.append(float(np.linalg.norm(env.integrator.velocity_world)))
+    assert np.allclose(speeds, 0.5, atol=1e-9), speeds
+
+    # ... whereas the acceleration contract it replaces does build.
+    acc = make(contract())
+    acc.reset(seed=0)
+    grows = []
+    for _ in range(5):
+        acc.step(np.array([0.5, 0.0, 0.0]))
+        grows.append(float(np.linalg.norm(acc.integrator.velocity_world)))
+    assert grows[-1] > grows[0] + 0.1, grows
+
+
+def test_velocity_moves_the_drone_the_distance_it_asked_for():
+    """A constant 1 m/s for 1 s of simulated time travels 1 m, less half a
+    step for the trapezoidal ramp-in from rest."""
+    rate = 10.0
+    env = make(velocity_contract(rate_hz=rate, scale=1.0),
+               cfg=EnvConfig(start_position_m=START, limits=BIG, max_steps=400,
+                             start_yaw_rad=0.0))
+    env.reset(seed=0)
+    p0 = env.position_m.copy()
+    for _ in range(int(rate)):
+        env.step(np.array([1.0, 0.0, 0.0]))
+    travelled = float(env.position_m[0] - p0[0])
+    assert abs(travelled - (1.0 - 0.5 / rate)) < 1e-9, travelled
+
+
+def test_velocity_is_clamped_by_the_same_envelope_as_flight():
+    tight = Limits(max_speed_ms=0.4, max_climb_ms=0.2)
+    env = make(velocity_contract(scale=3.0),
+               cfg=EnvConfig(start_position_m=START, limits=tight,
+                             max_steps=400))
+    env.reset(seed=0)
+    env.step(np.array([1.0, 0.0, 1.0]))
+    v = env.integrator.velocity_world
+    assert math.hypot(v[0], v[1]) <= tight.max_speed_ms + 1e-9
+    assert abs(v[2]) <= tight.max_climb_ms + 1e-9
+
+
+def test_velocity_body_frame_is_rotated_by_the_episode_heading():
+    """Forward is forward. At yaw=90 deg a body +x command moves world +y."""
+    env = make(velocity_contract(scale=1.0),
+               cfg=EnvConfig(start_position_m=START, limits=BIG, max_steps=400,
+                             start_yaw_rad=math.pi / 2.0))
+    env.reset(seed=0)
+    env.step(np.array([1.0, 0.0, 0.0]))
+    v = env.integrator.velocity_world
+    assert abs(v[0]) < 1e-9 and v[1] > 0.9, v
+
+
+def test_velocity_contract_reaches_the_gate():
+    """End to end: a trivial P controller flies the course, which is the
+    shape of what a student's assignment-2 submission does."""
+    env = make(velocity_contract(scale=2.0),
+               cfg=EnvConfig(start_position_m=START, limits=BIG,
+                             max_steps=200))
+    env.reset(seed=0)
+    target = np.array([3.5, 2.5, 0.6])
+    reason = None
+    for _ in range(200):
+        err = target - env.position_m
+        cmd = np.clip(1.2 * err / 2.0, -1.0, 1.0)      # scale=2.0
+        _, _, term, trunc, info = env.step(cmd)
+        if term or trunc:
+            reason = info["reason"]
+            break
+    assert reason == COURSE_COMPLETE, reason
 
 
 # ------------------------------------------------------------------- basics
@@ -244,3 +343,72 @@ def test_env_and_runtime_agree():
     # and the velocity the drone is asked for must match, step for step
     for k in range(n):
         assert np.allclose(rt_vel[k], env_vel[k], atol=1e-12), k
+
+
+def test_env_and_runtime_agree_on_a_velocity_contract():
+    """The same parity claim, for the contract assignment 2 uses.
+
+    A velocity contract has no integrator, so there is less machinery to
+    disagree -- but the frames, the clamps and the yaw rule still have to
+    match, and until make_action_stage() existed the runtime applied none of
+    them to a velocity action.
+    """
+    c = velocity_contract(scale=1.5)
+    raw = [0.7, -0.4, 0.0]
+    n = 12
+
+    env = make(c)
+    env.reset(seed=0)
+    positions = [env.position_m.copy()]
+    env_vel = []
+    for _ in range(n):
+        _, _, term, trunc, _ = env.step(raw)
+        assert not (term or trunc)
+        positions.append(env.position_m.copy())
+        env_vel.append(env.integrator.velocity_world.copy())
+
+    yaw = env.integrator.episode_yaw_rad
+    q = (0.0, 0.0, math.sin(yaw / 2.0), math.cos(yaw / 2.0))
+    dt = c.control.dt_s
+    samples = [PoseSample(i * dt, p, q) for i, p in enumerate(positions)]
+    rt = Runtime(ScriptedPoseSource(samples),
+                 FakeRenderer(c.observation.sensor, ROOM),
+                 Replay(c.action, raw),
+                 config=RuntimeConfig(contract=c, limits=BIG,
+                                      max_duration_s=1e6,
+                                      rate_check_after=10**6))
+    assert rt.integrator.__class__.__name__ == "VelocityPassthrough"
+    rt_vel = []
+    for i in range(n + 1):
+        rt.poses.advance()
+        r = rt.step(now=i * dt)
+        assert r.command is not None, r.events
+        rt_vel.append(rt.integrator.velocity_world.copy())
+
+    for k in range(n):
+        assert np.allclose(rt_vel[k], env_vel[k], atol=1e-12), k
+
+
+def test_a_fixed_yaw_velocity_contract_commands_no_yaw_rate_in_flight():
+    """yaw_mode='fixed' means the policy has only seen one heading. The env
+    zeroes the yaw rate; before make_action_stage() the runtime did not, so a
+    policy could rotate itself out of its own training distribution."""
+    from splat_hitl.commands import Action
+
+    c = velocity_contract(yaw_mode="fixed")
+    stage = make_action_stage(c.action, c.control.dt_s, BIG)
+    stage.reset(episode_yaw_rad=0.0)
+    out, _ = stage.step(Action(kind="velocity", frame="body_flu",
+                               vector=np.array([0.5, 0.0, 0.0]),
+                               yaw_rate_rad_s=1.7),
+                        current_yaw_rad=0.0)
+    assert out.yaw_rate_rad_s == 0.0
+
+    free = velocity_contract(yaw_mode="free")
+    stage = make_action_stage(free.action, free.control.dt_s, BIG)
+    stage.reset(episode_yaw_rad=0.0)
+    out, _ = stage.step(Action(kind="velocity", frame="body_flu",
+                               vector=np.array([0.5, 0.0, 0.0]),
+                               yaw_rate_rad_s=1.7),
+                        current_yaw_rad=0.0)
+    assert out.yaw_rate_rad_s == pytest.approx(1.7)

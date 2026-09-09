@@ -47,7 +47,7 @@ import numpy as np
 
 from .collision import CollisionMonitor
 from .commands import (Action, Clamped, HoverCommand, Limits,
-                       VelocityIntegrator, to_hover)
+                       VelocityIntegrator, make_action_stage, to_hover)
 from .contract import PolicyContract
 from .observation import ObservationBuilder
 from .frames import matrix_to_quat, matrix_to_rpy, quat_to_matrix
@@ -242,6 +242,7 @@ class Runtime:
                     % (policy.name, policy.sensor_fingerprint, want))
 
         self.builder: Optional[ObservationBuilder] = None
+        #: VelocityIntegrator or VelocityPassthrough, per contract.action.kind
         self.integrator: Optional[VelocityIntegrator] = None
         c = config.contract
         if c is not None:
@@ -261,8 +262,12 @@ class Runtime:
                     "as %s. Compare the two files rather than guessing which "
                     "field moved." % (policy.name, declared, c.fingerprint()))
             self.builder = ObservationBuilder(c.observation)
-            if c.action.kind == "acceleration":
-                self.integrator = VelocityIntegrator(
+            # The same call the env makes, so an acceleration contract flies
+            # through the integrator it trained with and a velocity contract
+            # through the passthrough it trained with. A position contract
+            # gets neither and goes straight to to_hover().
+            if c.action.kind in ("acceleration", "velocity"):
+                self.integrator = make_action_stage(
                     c.action, c.control.dt_s, config.limits,
                     hold_yaw_gain=config.hold_yaw_gain)
         self.poses = pose_source

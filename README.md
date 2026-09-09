@@ -50,7 +50,7 @@ name rather than discovered on a drone.
 | `contract.py` | observation + action + control, and one fingerprint over all of it |
 | `sensor.py` | the camera: resolution, field of view, mount, depth encoding |
 | `observation.py` | metric depth and colour → the array the policy reads |
-| `commands.py` | actions → Crazyflie commands, and `VelocityIntegrator` |
+| `commands.py` | actions → Crazyflie commands; the integrator and the passthrough |
 
 **The scene** — what a student is handed.
 
@@ -66,7 +66,7 @@ name rather than discovered on a drone.
 
 | | |
 |---|---|
-| `env.py` | the training environment. Same builder, same integrator as flight |
+| `env.py` | the training environment. Same builder, same action stage as flight |
 | `gym_env.py` | optional Gymnasium adapter |
 | `renderer.py` | `SplatWorkerClient` for a real scene, `FakeRenderer` for a toy one |
 | `policy.py` | the slot your work goes in |

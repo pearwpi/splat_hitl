@@ -9,8 +9,8 @@ that already owns the policy-facing half of the pipeline.
 That constraint turns out to be the right architecture rather than a
 compromise. Sim-to-real parity used to be TWO IMPLEMENTATIONS THAT MUST AGREE,
 policed after the fact by comparing a fingerprint. Here the environment and the
-runtime import the same `ObservationBuilder`, the same `VelocityIntegrator` and
-the same `PolicyContract`, so a policy sees a byte-identical observation and its
+runtime import the same `ObservationBuilder`, the same action stage and the
+same `PolicyContract`, so a policy sees a byte-identical observation and its
 action produces an identical velocity in both. Parity stops being enforced and
 becomes structural: there is no second implementation to drift.
 
@@ -19,15 +19,32 @@ to a worker process over JSON, and that worker drags torch, gsplat, nerfstudio
 and CUDA. This package is numpy-only and should stay that way, because a
 student who cannot import it cannot start.
 
+TWO KINDS OF ACTION
+-------------------
+`contract.action.kind` decides what the policy's three numbers mean, and the
+env picks the matching stage at construction:
+
+    "acceleration"  a double integrator, the RL default. The policy commands a
+                    change in velocity and carries the velocity itself as
+                    state, so its timestep is part of its behaviour.
+    "velocity"      a passthrough. The policy IS the outer loop -- a hand-tuned
+                    PID, say -- and its output is the velocity it wants. There
+                    is no integrator and no state to wind up.
+
+Both end at the same place: a clamped world-ENU velocity that steps position.
+So a position controller tuned here and an RL policy trained here are flown by
+identical code, and the gains you find in sim are the gains you fly.
+
 WHAT IS SIMULATED, AND WHAT IS NOT
 ----------------------------------
-The dynamics are a double integrator with a velocity envelope -- exactly what
-`VelocityIntegrator` does in flight, because it IS that object. There is no
-attitude loop, no drag, no rotor dynamics and no ground effect. That is the
-honest boundary: this trains a policy that decides WHERE TO GO, and the real
-drone's controller decides how. A policy that only works because it exploited
-frictionless flight will show up as a large `divergence_ms` on the first HITL
-run, which is what that column is for.
+The dynamics are a velocity envelope, integrated -- exactly what the flight
+path applies, because it IS that object. There is no attitude loop, no drag,
+no rotor dynamics and no ground effect, and a commanded velocity is reached
+instantly. That is the honest boundary: this trains a policy that decides
+WHERE TO GO, and the real drone's controller decides how. A controller that
+only works because it exploited frictionless flight will show up as overshoot
+on the first HITL run that sim never predicted -- for an acceleration contract
+the `divergence_ms` column measures exactly that gap.
 
     env = SplatEnv(contract, renderer, course, esdf)
     obs, info = env.reset(seed=0)
@@ -35,7 +52,9 @@ run, which is what that column is for.
 
 `raw_action` is the network's raw output -- the [-1, 1] box. Scaling, clipping
 and the norm limit happen inside, through `action_from_raw`, so the policy is
-trained against the same interpretation the runtime will apply.
+trained against the same interpretation the runtime will apply. That is true
+of a PID's output too: emit metres per second divided by `action.scale`, and
+the envelope is applied for you.
 """
 from __future__ import annotations
 
@@ -45,7 +64,7 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 import numpy as np
 
 from .collision import ESDF, CollisionMonitor
-from .commands import Limits, VelocityIntegrator, action_from_raw
+from .commands import Limits, action_from_raw, make_action_stage
 from .contract import PolicyContract
 from .gates import PASSED, GateCourse
 from .observation import ObservationBuilder
@@ -113,19 +132,23 @@ class SplatEnv:
                 "has never seen the world it is asked to fly in."
                 % (contract.observation.sensor.fingerprint(),
                    renderer.sensor.fingerprint()))
-        if contract.action.kind != "acceleration":
+        # Acceleration and velocity contracts both fly here; they differ only
+        # in which action stage sits between the policy and the position
+        # update. A position contract does not -- it commands a place, and
+        # nothing in this env would then be simulating a controller.
+        if contract.action.kind not in ("acceleration", "velocity"):
             raise ValueError(
-                "this environment integrates accelerations; the contract emits "
-                "%r. A velocity contract needs no integrator and a different "
-                "env." % (contract.action.kind,))
+                "this environment steps a velocity; the contract emits %r. A "
+                "position contract needs a tracking controller in front of it, "
+                "which is a different env." % (contract.action.kind,))
         self.contract = contract
         self.renderer = renderer
         self.course = course
         self.cfg = config
         self.builder = ObservationBuilder(contract.observation)
-        self.integrator = VelocityIntegrator(contract.action,
-                                             contract.control.dt_s,
-                                             config.limits)
+        self.integrator = make_action_stage(contract.action,
+                                            contract.control.dt_s,
+                                            config.limits)
         self.monitor = (None if esdf is None
                         else CollisionMonitor(esdf, config.clearance_m))
         self.rng = np.random.default_rng(config.seed)
@@ -185,10 +208,13 @@ class SplatEnv:
         velocity_action, _ = self.integrator.step(action, current_yaw_rad=self.yaw_rad)
         v_now = np.asarray(velocity_action.vector, dtype=float)
 
-        # Trapezoidal on the CLAMPED velocities. Equal to p + v*dt + a*dt^2/2
-        # while the envelope is not binding, and correct when it is -- using
-        # the raw acceleration there would move the drone further than the
-        # velocity it is actually allowed to have.
+        # Trapezoidal on the CLAMPED velocities. Under an acceleration
+        # contract this equals p + v*dt + a*dt^2/2 while the envelope is not
+        # binding, and stays correct when it is -- using the raw acceleration
+        # there would move the drone further than the velocity it is actually
+        # allowed to have. Under a velocity contract it averages the previous
+        # and current commands, which is the same rule and is why a step
+        # command does not teleport the drone a full dt on its first tick.
         p_prev = self.position_m.copy()
         self.position_m = p_prev + 0.5 * (v_prev + v_now) * dt
         self.steps += 1

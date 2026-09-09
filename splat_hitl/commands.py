@@ -391,6 +391,147 @@ class VelocityIntegrator:
                                      divergence, self.spec.integrator, err, hit)
 
 
+class VelocityPassthrough:
+    """Velocity action -> velocity Action. The trivial case, made explicit.
+
+    A velocity contract has no integrator. The policy's number IS the
+    commanded velocity, so there is no state to wind up, nothing to reset but
+    the heading, and no divergence between "what the policy thinks its
+    velocity is" and "what it commanded" -- those are the same number.
+
+    It exists so that SplatEnv has one seam instead of a branch: this class
+    and VelocityIntegrator present the same three methods, and the env picks
+    one at construction and never asks again.
+
+    WHAT IT STILL DOES, AND WHY
+    ---------------------------
+    Three things, all of which happen in flight too, so leaving any of them
+    out would make the simulator the easier world:
+
+    * rotates a body-frame command into world ENU, because that is what
+      `to_hover` does before it reaches the radio;
+    * clamps to the same `Limits` envelope, so a student whose gains ask for
+      4 m/s discovers the ceiling in sim rather than in the net;
+    * forces the yaw rate to zero under `yaw_mode="fixed"`, because a fixed
+      contract means the policy has only ever seen the course from its
+      starting heading.
+
+    WHAT IT DELIBERATELY DOES NOT DO
+    --------------------------------
+    No first-order lag. The commanded velocity is applied immediately, which
+    says the inner loop tracks velocity perfectly -- it does not. That gap is
+    real and it is the interesting part of an outer-loop tuning exercise, so
+    it is left visible rather than approximated with a time constant nobody
+    measured. Pass `measured_velocity_world` and the report carries the gap;
+    in simulation there is nothing to measure and it reads n/a.
+    """
+
+    def __init__(self, spec, dt_s: float, limits: Limits = Limits(),
+                 hold_yaw_gain: float = 0.0):
+        if spec.kind != "velocity":
+            raise ValueError("VelocityPassthrough is for velocity actions; "
+                             "this contract emits %r. An acceleration action "
+                             "needs VelocityIntegrator." % (spec.kind,))
+        if not dt_s > 0:
+            raise ValueError("dt_s must be positive, got %r" % (dt_s,))
+        if hold_yaw_gain < 0:
+            raise ValueError("hold_yaw_gain must be >= 0")
+        self.spec = spec
+        self.dt_s = float(dt_s)
+        self.limits = limits
+        self.hold_yaw_gain = float(hold_yaw_gain)
+        self.episode_yaw_rad = 0.0
+        self.velocity_world = np.zeros(3, dtype=float)
+        self._started = False
+
+    def reset(self, episode_yaw_rad: float, velocity_world=(0.0, 0.0, 0.0)) -> None:
+        """Start a run. `episode_yaw_rad` is the heading the policy assumes.
+
+        `velocity_world` is the velocity the drone is already carrying. There
+        is no integrator state here, but the env needs a previous velocity to
+        integrate position trapezoidally across the first step, and starting
+        that at something other than the truth puts a step into tick one.
+        """
+        if not math.isfinite(episode_yaw_rad):
+            raise ValueError("episode_yaw_rad is not finite")
+        self.episode_yaw_rad = float(episode_yaw_rad)
+        v = np.asarray(velocity_world, dtype=float).reshape(-1)
+        if v.shape != (3,):
+            raise ValueError("velocity_world must have 3 components")
+        self.velocity_world = v.copy()
+        self._started = True
+
+    def yaw_error_rad(self, current_yaw_rad: float) -> float:
+        """How far the drone has drifted from the heading the policy assumes."""
+        return _wrap_pi(float(current_yaw_rad) - self.episode_yaw_rad)
+
+    def _clamp(self, v: np.ndarray):
+        out = v.copy()
+        hit = False
+        speed = float(math.hypot(out[0], out[1]))
+        if speed > self.limits.max_speed_ms:
+            out[0] *= self.limits.max_speed_ms / speed
+            out[1] *= self.limits.max_speed_ms / speed
+            hit = True
+        if abs(out[2]) > self.limits.max_climb_ms:
+            out[2] = math.copysign(self.limits.max_climb_ms, out[2])
+            hit = True
+        return out, hit
+
+    def step(self, action: Action, current_yaw_rad: float,
+             measured_velocity_world=None) -> Tuple[Action, IntegratorReport]:
+        """One control step. Returns a WORLD-ENU velocity Action and a report."""
+        if not self._started:
+            raise RuntimeError(
+                "VelocityPassthrough.step() before reset(). Without a reset "
+                "the run inherits the previous run's heading, which is a "
+                "silently wrong flight rather than a failed one.")
+        if action.kind != "velocity":
+            raise ValueError("expected a velocity action, got %r" % (action.kind,))
+
+        # The CURRENT yaw, not the episode yaw: this is the rotation `to_hover`
+        # applies in flight, and matching it is the whole point. Under
+        # yaw_mode="fixed" the two agree anyway -- and when they stop agreeing,
+        # the runtime has already dropped to HOLDING.
+        commanded, hit = self._clamp(to_world_enu(action, float(current_yaw_rad)))
+        self.velocity_world = commanded
+
+        measured = None
+        divergence = float("nan")
+        if measured_velocity_world is not None:
+            m = np.asarray(measured_velocity_world, dtype=float).reshape(-1)
+            if m.shape != (3,):
+                raise ValueError("measured_velocity_world must have 3 components")
+            measured = m.copy()
+            divergence = float(np.linalg.norm(commanded - measured))
+
+        err = self.yaw_error_rad(current_yaw_rad)
+        yaw_rate = (-self.hold_yaw_gain * err if self.spec.yaw_mode == "fixed"
+                    else action.yaw_rate_rad_s)
+
+        out = Action(kind="velocity", frame="world_enu", vector=commanded,
+                     yaw_rate_rad_s=float(yaw_rate))
+        return out, IntegratorReport(commanded.copy(), measured, divergence,
+                                     "passthrough", err, hit)
+
+
+def make_action_stage(spec, dt_s: float, limits: Limits = Limits(),
+                      hold_yaw_gain: float = 0.0):
+    """The right action->velocity stage for a contract's ActionSpec.
+
+    One call site instead of a branch repeated in the env, the runtime and
+    every test: an acceleration contract gets the double integrator it was
+    trained with, a velocity contract gets the passthrough.
+    """
+    if spec.kind == "acceleration":
+        return VelocityIntegrator(spec, dt_s, limits, hold_yaw_gain)
+    if spec.kind == "velocity":
+        return VelocityPassthrough(spec, dt_s, limits, hold_yaw_gain)
+    raise ValueError(
+        "no action stage for kind %r. A position contract commands a place, "
+        "not a rate, and does not pass through this path." % (spec.kind,))
+
+
 # ------------------------------------------------------------------ commands
 @dataclass(frozen=True)
 class HoverCommand:
