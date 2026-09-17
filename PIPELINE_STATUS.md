@@ -106,8 +106,9 @@ command → radio → drone, which has never once executed end to end.
 3. ~~Render worker up; `SplatWorkerClient` against it.~~ Done 2026-09-17 on
    `net_2026-09-16`: `render_check` renders a tape-measured box 1.000 m away
    and reads 1.002-1.026 m, agreeing with an independent ESDF ray to 21 mm.
-   2-7 ms per frame after warm-up, against a 66 ms budget at 15 Hz. Getting
-   there cost three real bugs -- normalised depth, camera basis, mount sign.
+   2-7 ms per frame after warm-up, against a 66 ms budget at 15 Hz. Not
+   mirrored, by 22.5x. Getting there cost three real bugs -- normalised depth,
+   camera basis, mount sign -- none of which raised an error.
 4. `--yaw-sign` props off. *(lab, 10 min)*
 5. `HoverPolicy` HITL flight. *(lab)*
 
