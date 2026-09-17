@@ -23,7 +23,7 @@ SPLAT_BYTES = b"not a real splat, and this module never parses one"
 def write_bundle(root, *, gate_centre=(2.0, 2.0, 0.6), scale=1.0,
                  esdf_mpu=1.0, voxel=0.05, truncation=1.0,
                  checksum=True, fingerprint=True, with_transform=False,
-                 drop=(), dataparser=True):
+                 drop=(), dataparser=True, map_lines=None, task=None):
     root = str(root)
     os.makedirs(root, exist_ok=True)
     files = {}
@@ -57,6 +57,16 @@ def write_bundle(root, *, gate_centre=(2.0, 2.0, 0.6), scale=1.0,
         SplatTransform.identity_metres(esdf_mpu).save(
             os.path.join(root, "vicon_transform.json"))
         files["vicon_transform"] = "vicon_transform.json"
+
+    if map_lines is not None:
+        with open(os.path.join(root, "map.txt"), "w") as fh:
+            fh.write(map_lines)
+        files["map"] = "map.txt"
+
+    if task is not None:
+        with open(os.path.join(root, "task.json"), "w") as fh:
+            json.dump(task, fh)
+        files["task"] = "task.json"
 
     for k in drop:
         files.pop(k, None)
@@ -199,3 +209,81 @@ def test_a_bundle_with_a_registration_says_nothing_about_it(tmp_path):
     rep = b.check()
     assert rep.ok and not any("cannot be FLOWN" in n for n in rep.notes)
     assert b.transform() is not None
+
+
+# ------------------------------------------------- a scene that is not a race
+#: 4 x 4 x 2 m, matching write_bundle's all-free ESDF. No blocks, so nothing in
+#: it can disagree with a distance field that says everything is clear.
+EMPTY_MAP = "# a room with nothing in it\nboundary 0 0 0 4 4 2\n"
+
+
+def test_a_bundle_without_gates_is_valid_and_says_so(tmp_path):
+    """A planning scene poses a start and a goal, not a course. Requiring gates
+    forced every such scene to invent some, which is how this bundle got a
+    four-gate slalom it had no use for."""
+    rep = SceneBundle.load(write_bundle(tmp_path, drop=("gates",))).check()
+    assert rep.ok, str(rep)
+    assert any("not a race course" in n for n in rep.notes), str(rep)
+
+
+def test_a_map_of_empty_space_agrees_with_an_empty_esdf(tmp_path):
+    rep = SceneBundle.load(write_bundle(tmp_path, drop=("gates",),
+                                        with_transform=True,
+                                        map_lines=EMPTY_MAP)).check()
+    assert rep.ok, str(rep)
+    assert any("BlockMap" in n for n in rep.notes), str(rep)
+
+
+def test_a_block_that_is_open_space_in_the_esdf_is_an_error(tmp_path):
+    """Someone moved a box and edited the map without recapturing, or the other
+    way round. Both files still load; every verified plan flies into nothing,
+    or through something."""
+    rep = SceneBundle.load(write_bundle(
+        tmp_path, drop=("gates",), with_transform=True,
+        map_lines=EMPTY_MAP + "block 1 1 0 2 2 1 255 0 0\n")).check()
+    assert not rep.ok
+    assert any("open space in the ESDF" in e for e in rep.errors), str(rep)
+
+
+def test_a_map_that_cannot_be_compared_says_so_rather_than_passing(tmp_path):
+    """No registration means the map and the ESDF are in different frames.
+    Silently skipping the comparison would read as a clean bill of health."""
+    rep = SceneBundle.load(write_bundle(tmp_path, drop=("gates",),
+                                        map_lines=EMPTY_MAP)).check()
+    assert rep.ok, str(rep)
+    assert any("different frames" in n for n in rep.notes), str(rep)
+
+
+def test_a_goal_outside_the_map_boundary_is_an_error(tmp_path):
+    rep = SceneBundle.load(write_bundle(
+        tmp_path, drop=("gates",), with_transform=True, map_lines=EMPTY_MAP,
+        task={"pairs": [{"name": "p", "start": [1, 1, 1],
+                         "goal": [9, 1, 1]}]})).check()
+    assert not rep.ok
+    assert any("outside the map boundary" in e for e in rep.errors), str(rep)
+
+
+def test_a_start_inside_a_block_is_an_error(tmp_path):
+    rep = SceneBundle.load(write_bundle(
+        tmp_path, drop=("gates",), with_transform=True,
+        map_lines=EMPTY_MAP + "block 1 1 0 2 2 1 0 255 0\n",
+        task={"pairs": [{"name": "p", "start": [1.5, 1.5, 0.5],
+                         "goal": [3, 3, 1]}]})).check()
+    assert not rep.ok
+    assert any("inside a block" in e for e in rep.errors), str(rep)
+
+
+def test_a_task_with_no_pairs_poses_no_problem(tmp_path):
+    rep = SceneBundle.load(write_bundle(
+        tmp_path, drop=("gates",), with_transform=True, map_lines=EMPTY_MAP,
+        task={"pairs": []})).check()
+    assert any("poses no problem" in w for w in rep.warnings), str(rep)
+
+
+def test_endpoints_in_open_space_pass(tmp_path):
+    rep = SceneBundle.load(write_bundle(
+        tmp_path, drop=("gates",), with_transform=True, map_lines=EMPTY_MAP,
+        task={"pairs": [{"name": "p", "start": [0.5, 0.5, 0.5],
+                         "goal": [3.5, 3.5, 1.5]}]})).check()
+    assert rep.ok, str(rep)
+

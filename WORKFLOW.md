@@ -21,9 +21,10 @@ A **scene bundle** is a directory. Check it before you use it:
 python3 -m splat_hitl.bundle scenes/<scene>
 ```
 
-It verifies the parts against each other — that the gates lie inside the
-mapped volume, that the ESDF and the splat were built at the same scale, that
-the contract file matches what the manifest says it is. Exit code 0 means the
+It verifies the parts against each other — that the ESDF and the splat were
+built at the same scale, that the contract file matches what the manifest says
+it is, that any gates lie inside the mapped volume, and that the map handed to
+the student describes the room the ESDF was built from. Exit code 0 means the
 scene is coherent. It is not a formality: a scene whose ESDF came from a
 different export runs perfectly and scores you against a differently sized copy
 of the room.

@@ -401,14 +401,31 @@ def fov_x_deg_from_transforms(path) -> float:
     nobody has to guess it.
 
         python3 -m splat_hitl.contract path/to/transforms.json
+
+    Nerfstudio puts the intrinsics at the TOP LEVEL when one camera describes
+    every frame, and PER FRAME when it will not promise that -- which is what
+    `ns-process-data polycam` writes unconditionally, even where every frame in
+    fact agrees. Both are read here. Frames that disagree are refused rather
+    than averaged: a contract pins ONE field of view, and a capture shot through
+    two cameras does not have one.
     """
     with open(path) as fh:
         d = json.load(fh)
-    for k in ("fl_x", "fl_y", "w", "h"):
-        if k not in d and k in ("fl_x", "w"):
-            raise ValueError("%s has no %r -- is this a Nerfstudio "
-                             "transforms.json?" % (path, k))
-    fl_x, width = float(d["fl_x"]), float(d["w"])
+    fl_x, width = d.get("fl_x"), d.get("w")
+    if fl_x is None or width is None:
+        seen = {(f["fl_x"], f["w"]) for f in (d.get("frames") or [])
+                if "fl_x" in f and "w" in f}
+        if not seen:
+            raise ValueError(
+                "%s carries no 'fl_x'/'w', neither at the top level nor on any "
+                "frame -- is this a Nerfstudio transforms.json?" % (path,))
+        if len(seen) > 1:
+            raise ValueError(
+                "%s has %d different (fl_x, w) pairs across its frames, so no "
+                "single field of view describes it. Re-process the capture "
+                "rather than picking one." % (path, len(seen)))
+        fl_x, width = seen.pop()
+    fl_x, width = float(fl_x), float(width)
     if not (fl_x > 0 and width > 0):
         raise ValueError("fl_x and w must be positive, got %r and %r" % (fl_x, width))
     return math.degrees(2.0 * math.atan(width / (2.0 * fl_x)))

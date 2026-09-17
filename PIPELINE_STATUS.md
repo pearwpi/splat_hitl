@@ -98,11 +98,11 @@ command → radio → drone, which has never once executed end to end.
 1. Marker standoff on `crazyflie22`, delete and re-teach the Tracker object,
    clear `marker_geom.py --sweep`, then confirm empirically with
    `track_monitor.py`. *(lab, hardware)*
-2. **Vicon↔splat calibration.** Solved for `net_2026-09-16` — 23 mm RMS over
+2. ~~**Vicon↔splat calibration.**~~ Done for `net_2026-09-16`: 23 mm RMS over
    218k box-surface points, fitted against four tape-measured boxes rather than
-   through `calibrate collect`, which still has no run against real data. No
-   other scene has one, and that scene's bundle is not yet assembled (no ESDF,
-   gates or manifest). *(done for one scene)*
+   through `calibrate collect`, which still has no run against real data. That
+   scene is a complete bundle and `bundle.check()` exits 0 on it. No other scene
+   has a registration.
 3. Render worker up; `SplatWorkerClient` against it. Never tested. *(lab, GPU)*
 4. `--yaw-sign` props off. *(lab, 10 min)*
 5. `HoverPolicy` HITL flight. *(lab)*

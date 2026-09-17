@@ -15,7 +15,8 @@ import pytest
 from splat_hitl.commands import (Limits, VelocityIntegrator,
                                  action_from_raw, to_hover)
 from splat_hitl.contract import (ActionSpec, ControlSpec, ObservationSpec,
-                                 PolicyContract, metric_splat_depth_ppo_v1)
+                                 PolicyContract, fov_x_deg_from_transforms,
+                                 metric_splat_depth_ppo_v1)
 from splat_hitl.observation import ObservationBuilder
 from splat_hitl.sensor import SensorModel
 
@@ -380,3 +381,42 @@ def test_the_shipped_example_config_loads():
     it.reset(episode_yaw_rad=0.0)
     act, _ = it.step(action_from_raw(c.action, [1, 0, 0]), 0.0)
     to_hover(act, current_yaw_rad=0.0, target_altitude_m=0.6)
+
+
+# --------------------------------------------------- recovering the scene's FOV
+def _transforms(tmp_path, payload):
+    p = tmp_path / "transforms.json"
+    p.write_text(json.dumps(payload))
+    return str(p)
+
+
+def test_fov_reads_the_top_level_intrinsics_when_there_are_any(tmp_path):
+    got = fov_x_deg_from_transforms(
+        _transforms(tmp_path, {"fl_x": 849.075, "w": 994, "frames": []}))
+    assert got == pytest.approx(60.6845, abs=1e-3)
+
+
+def test_fov_falls_back_to_per_frame_intrinsics(tmp_path):
+    """`ns-process-data polycam` writes intrinsics per frame and never at the
+    top level, even when every frame agrees -- which is the only shape a
+    Polycam-captured scene ever arrives in."""
+    got = fov_x_deg_from_transforms(_transforms(tmp_path, {
+        "camera_model": "OPENCV",
+        "frames": [{"fl_x": 849.075, "w": 994, "file_path": "images/%d.jpg" % i}
+                   for i in range(3)]}))
+    assert got == pytest.approx(60.6845, abs=1e-3)
+
+
+def test_frames_that_disagree_on_intrinsics_are_refused(tmp_path):
+    """A contract pins ONE field of view. A capture shot through two cameras
+    does not have one, and averaging them would be a silent wrong answer."""
+    with pytest.raises(ValueError, match="different"):
+        fov_x_deg_from_transforms(_transforms(tmp_path, {"frames": [
+            {"fl_x": 849.075, "w": 994}, {"fl_x": 612.0, "w": 994}]}))
+
+
+def test_transforms_carrying_no_intrinsics_at_all_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="neither at the top level"):
+        fov_x_deg_from_transforms(
+            _transforms(tmp_path, {"frames": [{"file_path": "a.jpg"}]}))
+
