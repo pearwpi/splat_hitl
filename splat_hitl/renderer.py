@@ -274,9 +274,12 @@ class SplatWorkerClient(RendererClient):
                     "rgb_shape": [...], "rgb_b64": ...}
         shutdown   {"cmd": "close"}
 
-    NOT EXERCISED AGAINST A LIVE WORKER YET -- it needs a GPU and a scene. The
-    protocol is transcribed from `splat_rendering.py` rather than assumed, but
-    treat the first run on pear-2 as an integration test, not a formality.
+    Exercised against a live CUDA worker on 2026-09-17, which was worth doing:
+    the first run found that the worker returns NORMALISED depth (this file
+    claimed metres), that its camera looks along world -Z so a body attitude
+    handed over unrotated renders the floor, and that `mount_pitch_deg` pointed
+    up. All three are fixed above. `python3 -m splat_hitl.render_check` is what
+    found them and what to re-run after touching any of it.
     """
 
     def __init__(self, sensor: SensorModel, worker_cmd: Sequence[str],
