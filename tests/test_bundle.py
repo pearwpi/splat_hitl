@@ -151,6 +151,20 @@ def test_scale_disagreement_between_esdf_and_dataparser(tmp_path):
     assert not rep.ok and any("scale disagreement" in e for e in rep.errors)
 
 
+def test_a_percent_of_capture_scale_error_is_a_warning(tmp_path):
+    """A metric capture lands within about a percent of a tape measure.
+
+    That gap is the capture's scale error, measured -- not a mismatched export.
+    Failing the bundle for it would fail every honestly registered scene, so it
+    is reported with both numbers and the measured value is the one kept.
+    """
+    rep = SceneBundle.load(write_bundle(tmp_path, scale=1.0 / 1.014,
+                                        esdf_mpu=1.0)).check()
+    assert rep.ok, str(rep)
+    assert any("capture's scale error" in w and "1.4%" in w
+               for w in rep.warnings), str(rep)
+
+
 def test_a_registration_at_a_different_scale_is_an_error(tmp_path):
     root = write_bundle(tmp_path, with_transform=True)
     SplatTransform.identity_metres(3.0).save(

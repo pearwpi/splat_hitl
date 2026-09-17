@@ -45,6 +45,11 @@ __all__ = ["SceneBundle", "BundleReport", "MANIFEST_NAME"]
 
 MANIFEST_NAME = "manifest.json"
 
+#: How far the capture's own scale may sit from the measured one before it
+#: stops being capture error and starts being a mismatched export. A metric
+#: VIO or LiDAR capture lands within about a percent of a tape measure.
+DATAPARSER_SCALE_TOL = 0.03
+
 #: Keys the manifest may name, and whether a bundle is unusable without them.
 #: `vicon_transform` is optional because a bundle is useful for TRAINING before
 #: anyone has been in the lab; `check()` says so rather than failing.
@@ -246,7 +251,15 @@ class SceneBundle:
                     "%.0f mm clearance: flying it correctly registers as a "
                     "collision" % (g.name, c.metres * 1000, clearance_m * 1000))
 
-        # -- one scale, from one source --------------------------------------
+        # -- one scale, and which source wins ---------------------------------
+        # The dataparser scale is the CAPTURE'S CLAIM about how big the room is.
+        # The Vicon registration is a MEASUREMENT of the same room against a
+        # tape. On a LiDAR/VIO capture they disagree by around a percent, because
+        # that is what such a capture is worth -- so a small gap here is a
+        # finding, reported with both numbers, and the measured value wins.
+        # Past DATAPARSER_SCALE_TOL it is no longer capture error: it is two
+        # different exports, which is the failure this whole file exists to
+        # catch, and that stays an error.
         dp = self.path("dataparser_transforms")
         if dp and os.path.exists(dp):
             try:
@@ -256,12 +269,22 @@ class SceneBundle:
                 r.warnings.append("dataparser_transforms unreadable: %r" % (exc,))
             else:
                 mpu = 1.0 / scale if scale else float("nan")
-                if not np.isclose(mpu, esdf.metres_per_unit, rtol=1e-3):
+                off = abs(mpu / esdf.metres_per_unit - 1.0)
+                if off > DATAPARSER_SCALE_TOL:
                     r.errors.append(
                         "scale disagreement: dataparser_transforms implies "
-                        "%.6f m per unit, the ESDF carries %.6f. One of them "
-                        "was built from a different export."
-                        % (mpu, esdf.metres_per_unit))
+                        "%.6f m per unit, the ESDF carries %.6f -- %.1f%% apart, "
+                        "well past the %.0f%% that a capture's own scale error "
+                        "explains. One was built from a different export."
+                        % (mpu, esdf.metres_per_unit, off * 100.0,
+                           DATAPARSER_SCALE_TOL * 100.0))
+                elif off > 1e-3:
+                    r.warnings.append(
+                        "the capture claims %.6f m per unit, the ESDF was built "
+                        "at %.6f -- %.1f%% apart. That gap IS the capture's "
+                        "scale error, and the ESDF carries the value measured "
+                        "against a tape, which is the one to trust."
+                        % (mpu, esdf.metres_per_unit, off * 100.0))
         else:
             r.warnings.append(
                 "no dataparser_transforms: the metric scale has no provenance "
