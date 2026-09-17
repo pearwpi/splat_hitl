@@ -8,7 +8,8 @@ velocity policy, which would otherwise rotate its world-frame command into a
 body frame that is 90 deg wrong and fly sideways at full commanded speed.
 """
 from splat_hitl.ros_node import (FLIP_GAP_CAP_S, MAX_YAW_RATE_DPS,
-                                 MIN_FLIP_DEG, is_solver_flip)
+                                 MIN_FLIP_DEG, _yaw_deg_of,
+                                 is_solver_flip)
 
 FRAME = 1.0 / 240.0
 
@@ -69,3 +70,31 @@ def test_step_test_is_the_binding_one_at_the_default_rate():
 def test_just_under_the_step_threshold_passes():
     flip, _, _ = is_solver_flip(MIN_FLIP_DEG - 0.1, 0.0, 0.0, FRAME)
     assert flip is False
+
+
+# --- the measurement feeding the decision ------------------------------------
+# These exist because the first version of this module used math.degrees
+# without importing math, and the tests above -- which only ever exercised
+# is_solver_flip -- passed anyway. A NameError then reached the pose callback
+# on a live drone. Test the input to the branch, not only the branch.
+
+def test_yaw_of_identity_is_zero():
+    assert abs(_yaw_deg_of((0.0, 0.0, 0.0, 1.0))) < 1e-9
+
+
+def test_yaw_of_quarter_turn_about_z():
+    import math
+    h = math.radians(90.0) / 2.0
+    q = (0.0, 0.0, math.sin(h), math.cos(h))
+    assert abs(_yaw_deg_of(q) - 90.0) < 1e-6
+
+
+def test_yaw_matches_pose_sample():
+    """The filter and the policy must read the same yaw off the same quat."""
+    import math
+    import numpy as np
+    from splat_hitl.runtime import PoseSample
+    h = math.radians(-37.5) / 2.0
+    q = (0.0, 0.0, math.sin(h), math.cos(h))
+    s = PoseSample(0.0, np.zeros(3), q)
+    assert abs(_yaw_deg_of(q) - math.degrees(s.yaw_rad)) < 1e-9
