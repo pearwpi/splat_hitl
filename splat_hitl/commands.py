@@ -106,7 +106,13 @@ class Limits:
     max_climb_ms: float = 0.6
     max_yaw_rate_rad_s: float = math.radians(90.0)
     min_altitude_m: float = 0.10
-    max_altitude_m: float = 1.20
+    #: Must reach the ceiling the geofence allows, or this caps the climb first
+    #: and the only symptom is a drone that stops rising with no error. 1.80 m
+    #: is the course volume's zmax; the tallest obstacle in it is 1.36 m, so a
+    #: lower value here makes flying OVER an obstacle impossible while the
+    #: planner happily routes you there. Move this and the driver's `bounds`
+    #: zmax together -- they are in different repositories and nothing links them.
+    max_altitude_m: float = 1.80
 
     def __post_init__(self):
         if not 0 < self.min_altitude_m < self.max_altitude_m:

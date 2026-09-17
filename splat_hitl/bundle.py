@@ -19,6 +19,15 @@ other rather than merely counting them:
 
     python3 -m splat_hitl.bundle scenes/playTunnels
 
+ONE THING THAT IS A WARNING AND NOT AN ERROR
+-------------------------------------------
+The metric scale. `dataparser_transforms.json` is the CAPTURE'S CLAIM about how
+big the room is; the Vicon registration is a MEASUREMENT of the same room. A
+LiDAR or VIO capture is good to about a percent, so they disagree, and failing
+a bundle for that would fail every honestly registered scene. Below
+`DATAPARSER_SCALE_TOL` the gap is reported with both numbers and the measured
+value is kept. Above it, it is two different exports, and still an error.
+
 WHAT IS DELIBERATELY NOT VALIDATED
 ----------------------------------
 The `.splat` itself. Parsing it needs the renderer's dependencies, and this

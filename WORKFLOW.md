@@ -43,6 +43,13 @@ esdf     = bundle.esdf()
 If `check()` reports *"cannot be FLOWN"*, the bundle has no Vicon
 registration yet. You can still train; you cannot yet fly it.
 
+A **warning about scale is normal and is not a fault.** A splat's metric scale
+comes from the capture, and a LiDAR or VIO capture is good to roughly a percent.
+The bundle carries the scale measured against the Vicon frame during
+registration, and reports how far the capture's own claim sits from it. Past
+`DATAPARSER_SCALE_TOL` (3%) that stops being capture error — it means two
+different exports — and becomes an error.
+
 ---
 
 ## 2. The contract — read this once, properly
