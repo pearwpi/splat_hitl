@@ -45,10 +45,68 @@ from .gates import GateCourse
 from .policy import GateSeekPolicy, HoverPolicy, Policy
 from .recorder import RunRecorder
 from .renderer import FakeRenderer, SplatWorkerClient
+from .frames import matrix_to_rpy, quat_to_matrix
 from .runtime import (PoseSample, PoseSource, Runtime, RuntimeConfig,
                       TransformedPoseSource)
 from .contract import PolicyContract
 from .sensor import SensorModel
+
+
+# --- mocap solver flips ------------------------------------------------------
+# A rotationally ambiguous rigid body makes Tracker switch between two equally
+# good fits of the same marker constellation. Yaw jumps ~90 or ~180 deg in a
+# single frame while the drone has not moved at all: the rotation is
+# FICTITIOUS, and the right response is to disbelieve it and keep the heading
+# we already had -- not to average it, not to track it.
+#
+# The driver refuses to feed such a quaternion to the onboard EKF
+# (cf_core.flip_check) and lands if they persist. Nothing protected the POLICY,
+# which is the more dangerous gap: a velocity policy rotates its world-frame
+# command into the body frame with this yaw on every step, so a yaw that is
+# 90 deg wrong does not degrade the flight, it aims it at the wall at full
+# commanded speed.
+#
+# Same test as cf_core, deliberately, so the two cannot disagree about what a
+# flip is: BOTH an absolute step over MIN_FLIP_DEG and an implied rate over
+# MAX_YAW_RATE_DPS. Ordinary solver jitter is 1-2 deg, so the step test alone
+# would also reject real rotation; the rate test alone fires on that jitter
+# whenever two frames arrive close together, which is why the divisor is
+# capped -- uncapped, one rejected frame makes the next look slow and lets the
+# flip through.
+MIN_FLIP_DEG = 45.0
+MAX_YAW_RATE_DPS = 720.0
+FLIP_GAP_CAP_S = 0.05
+
+
+def _wrap180(d: float) -> float:
+    return (d + 180.0) % 360.0 - 180.0
+
+
+def is_solver_flip(yaw_deg, last_yaw_deg, last_yaw_t, now):
+    """(is_flip, step_deg, rate_dps). Pure, so it can be tested without ROS.
+
+    Mirrors cf_core.flip_check. Kept as a free function rather than inlined in
+    the callback for exactly that reason: the one piece of logic standing
+    between a mirrored solution and a full-speed sideways command should be
+    testable without a live ROS graph and a physical drone.
+    """
+    if last_yaw_deg is None or last_yaw_t is None:
+        return (False, 0.0, 0.0)
+    d = abs(_wrap180(yaw_deg - last_yaw_deg))
+    gap = max(now - last_yaw_t, 1e-6)
+    rate = d / min(gap, FLIP_GAP_CAP_S)
+    return (d > MIN_FLIP_DEG and rate > MAX_YAW_RATE_DPS, d, rate)
+
+
+def _yaw_deg_of(quat) -> float:
+    """Yaw exactly as PoseSample.yaw_rad computes it.
+
+    Derived through the same matrix_to_rpy(quat_to_matrix(...)) path rather
+    than a hand-rolled atan2, because a filter that measures a different yaw
+    than the policy consumes is worse than no filter: it would pass the frames
+    it should catch and catch the frames it should pass.
+    """
+    return math.degrees(matrix_to_rpy(quat_to_matrix(*quat))[2])
 
 
 class ViconPoseSource(PoseSource):
@@ -65,6 +123,13 @@ class ViconPoseSource(PoseSource):
         from rosidl_runtime_py.utilities import get_message
         self._lock = threading.Lock()
         self._latest: Optional[PoseSample] = None
+        self._node = node
+        self._last_quat = None          # last orientation we believed
+        self._last_yaw_deg = None
+        self._last_yaw_t = None
+        self._quat_ok_t = None
+        self.yaw_rejects = 0
+        self._warned = False
         mtype = None
         for _ in range(50):
             for name, types in node.get_topic_names_and_types():
@@ -93,9 +158,34 @@ class ViconPoseSource(PoseSource):
         # staleness watchdog must compare against and it cannot be fooled by
         # clock skew with the Vicon PC. The header stamp -- which the bridge
         # sets to CAPTURE time -- rides along separately, for latency.
-        s = PoseSample(time.monotonic(),
+        now = time.monotonic()
+        quat = (q.x, q.y, q.z, q.w)
+        yaw_deg = _yaw_deg_of(quat)
+
+        flip, d, rate = is_solver_flip(yaw_deg, self._last_yaw_deg,
+                                      self._last_yaw_t, now)
+        if flip:
+            # Hold the last orientation we believed. _last_yaw_deg is NOT
+            # advanced: if the solver stays in the wrong solution, every
+            # following frame is measured against the heading we trust and is
+            # rejected too, so quat_age_s grows and the watchdog lands us.
+            # Advancing it here would let a latched flip walk the heading
+            # across in two steps that are each individually too small to catch.
+            self.yaw_rejects += 1
+            quat = self._last_quat
+            if not self._warned:
+                self._warned = True
+                self._node.get_logger().error(
+                    "yaw jumped %.0f deg (%.0f deg/s) -- rigid body is "
+                    "rotationally ambiguous. Holding the last good heading; "
+                    "the policy will not see the flip." % (d, rate))
+        else:
+            self._last_yaw_deg, self._last_yaw_t = yaw_deg, now
+            self._last_quat, self._quat_ok_t = quat, now
+
+        s = PoseSample(now,
                        np.array([o.x, o.y, o.z], dtype=float),
-                       (q.x, q.y, q.z, q.w),
+                       quat,
                        capture_t_s=h.sec + h.nanosec * 1e-9)
         with self._lock:
             self._latest = s
@@ -103,6 +193,16 @@ class ViconPoseSource(PoseSource):
     def latest(self) -> Optional[PoseSample]:
         with self._lock:
             return self._latest
+
+    def quat_age_s(self) -> float:
+        """Seconds since the last ACCEPTED orientation.
+
+        Deliberately not pose age. A solver latched onto the wrong solution
+        keeps delivering fresh, smooth, low-latency POSITION while every
+        orientation is rejected, and a position watchdog sees that as healthy.
+        """
+        t = self._quat_ok_t
+        return 1e9 if t is None else (time.monotonic() - t)
 
 
 def load_policy(spec: str) -> Policy:
@@ -192,7 +292,8 @@ def main(argv=None) -> int:
 
     rclpy.init()
     node = Node("splat_hitl")
-    source: PoseSource = ViconPoseSource(node, a.topic)
+    vicon = ViconPoseSource(node, a.topic)
+    source: PoseSource = vicon
     if transform is not None:
         source = TransformedPoseSource(source, transform)
     elif a.worker:
@@ -216,7 +317,15 @@ def main(argv=None) -> int:
                            % (1.0 / period, "  [DRY RUN]" if a.dry_run else ""))
     done = threading.Event()
 
+    # Longer than the driver's own QUAT_DEAD_S would be pointless -- it lands
+    # first. This exists so the HITL node stops COMMANDING at the same moment,
+    # instead of streaming setpoints at a drone that has started an auto-land.
+    QUAT_DEAD_S = 0.5
+
     def tick():
+        if vicon.quat_age_s() > QUAT_DEAD_S:
+            rt.stop("mocap orientation unusable for %.0f ms (%d yaw rejects)"
+                    % (vicon.quat_age_s() * 1000.0, vicon.yaw_rejects))
         r = rt.step()
         s = source.latest()
         if s is not None:
@@ -244,7 +353,8 @@ def main(argv=None) -> int:
         rec.finish("operator_stop")
     finally:
         renderer.close()
-        print("\n" + rt.summary() + "\n" + rec.summary() + "\n")
+        print("\n" + rt.summary() + "\n" + rec.summary()
+              + "\n  yaw rejects: %d" % vicon.yaw_rejects + "\n")
         if a.log:
             rec.save_json(a.log)
             rec.save_csv(str(a.log).rsplit(".", 1)[0] + ".csv")
