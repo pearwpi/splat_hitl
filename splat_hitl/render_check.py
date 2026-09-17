@@ -55,7 +55,7 @@ from .renderer import SplatWorkerClient
 from .sensor import SensorModel
 
 __all__ = ["write_png", "sphere_trace", "standoff_poses", "centre_depth_m",
-           "mirror_error_m"]
+           "mirror_error_m", "vicon_pose_to_worker"]
 
 
 def centre_depth_m(obs, half: int = 2) -> float:
@@ -206,13 +206,22 @@ def mirror_error_m(obs, esdf, tf, cam_vicon_m, yaw_rad, sensor,
             float(np.mean(np.abs(flipped - traced))))
 
 
-def _vicon_pose_to_worker(tf: SplatTransform, p_vicon_m, yaw_vicon_rad):
-    """(position in SPLAT METRES, body rpy in the splat frame).
+def vicon_pose_to_worker(tf: SplatTransform, p_vicon_m, yaw_vicon_rad):
+    """(position in SPLAT METRES, body rpy in the SPLAT frame).
 
-    `SplatWorkerClient.render` takes metres and divides by `scale_to_metres`
-    itself, while `SplatTransform.point_to_splat` hands back NORMALISED units.
-    The factor between them is exactly the bug this whole file is chasing, so
-    it is converted here, once, where it can be seen.
+    Two conversions, and missing either one is silent.
+
+    POSITION: `SplatWorkerClient.render` takes metres and divides by
+    `scale_to_metres` itself, while `SplatTransform.point_to_splat` hands back
+    NORMALISED units. The factor between them is 3.3 on this scene.
+
+    HEADING: the splat frame is rotated from the lab frame -- 61.7 degrees on
+    this scene, which is more than the camera's whole field of view. A yaw
+    passed through unconverted points the camera at something beside the
+    direction of travel, in every frame, by exactly the registration angle.
+
+    Public, and the only implementation, because the first thing that wrote its
+    own copy of this converted the position and forgot the heading.
     """
     R_body = rpy_to_matrix(0.0, 0.0, float(yaw_vicon_rad))
     pos_units = tf.point_to_splat(np.asarray(p_vicon_m, dtype=float)).reshape(3)
@@ -270,7 +279,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     rows, bad, mirrored = [], 0, []
     try:
         for name, cam, yaw, expect in standoff_poses(bmap, a.standoff_m):
-            pos_m, rpy = _vicon_pose_to_worker(tf, cam, yaw)
+            pos_m, rpy = vicon_pose_to_worker(tf, cam, yaw)
             obs = client.render(pos_m, rpy)
             d = obs.depth_m
             centre = centre_depth_m(obs)
@@ -318,3 +327,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 if __name__ == "__main__":                                   # pragma: no cover
     raise SystemExit(main())
+
+
+#: Kept so older callers do not break; the public name is the one to use.
+_vicon_pose_to_worker = vicon_pose_to_worker

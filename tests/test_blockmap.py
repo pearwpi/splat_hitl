@@ -121,3 +121,52 @@ def test_a_block_knows_its_own_distance():
     assert b.distance_to([[0.5, 0.5, 0.5]])[0] == pytest.approx(0.0)
     assert b.distance_to([[2.0, 0.5, 0.5]])[0] == pytest.approx(1.0)
     assert b.distance_to([[2.0, 2.0, 0.5]])[0] == pytest.approx(np.sqrt(2.0))
+
+
+# ------------------------------------------------ the cloud a bundle declares
+def _ply(tmp_path, xyz, extra_props=(), fmt="binary_little_endian"):
+    import struct
+    names = [("x", "<f4"), ("y", "<f4"), ("z", "<f4")] + list(extra_props)
+    head = ["ply", "format %s 1.0" % fmt, "element vertex %d" % len(xyz)]
+    inv = {"<f4": "float", "u1": "uchar", "<f8": "double"}
+    head += ["property %s %s" % (inv[t], n) for n, t in names]
+    head += ["end_header", ""]
+    p = tmp_path / "cloud.ply"
+    with open(p, "wb") as fh:
+        fh.write("\n".join(head).encode("ascii"))
+        rows = np.zeros(len(xyz), dtype=np.dtype(names))
+        rows["x"], rows["y"], rows["z"] = xyz[:, 0], xyz[:, 1], xyz[:, 2]
+        rows.tofile(fh)
+    return str(p)
+
+
+def test_reads_the_positions_out_of_a_splat_ply(tmp_path):
+    from splat_hitl.pointcloud import read_xyz
+    xyz = np.random.default_rng(0).normal(size=(50, 3))
+    got = read_xyz(_ply(tmp_path, xyz, [("opacity", "<f4"), ("f_dc_0", "<f4")]))
+    assert got.shape == (50, 3)
+    assert got == pytest.approx(xyz, abs=1e-6)
+
+
+def test_subsampling_keeps_order_and_count(tmp_path):
+    from splat_hitl.pointcloud import read_xyz
+    xyz = np.arange(300, dtype=float).reshape(100, 3)
+    got = read_xyz(_ply(tmp_path, xyz), max_points=10)
+    assert len(got) == 10
+    assert (np.diff(got[:, 0]) > 0).all()        # still in file order
+
+
+def test_an_ascii_ply_is_refused_rather_than_misread(tmp_path):
+    from splat_hitl.pointcloud import read_xyz
+    with pytest.raises(ValueError, match="binary little-endian"):
+        read_xyz(_ply(tmp_path, np.zeros((3, 3)), fmt="ascii"))
+
+
+def test_a_truncated_cloud_is_caught(tmp_path):
+    """The realistic failure for a 90 MB file moved by hand."""
+    from splat_hitl.pointcloud import read_xyz
+    p = _ply(tmp_path, np.zeros((100, 3)))
+    raw = open(p, "rb").read()
+    open(p, "wb").write(raw[:-400])
+    with pytest.raises(ValueError, match="truncated"):
+        read_xyz(p)

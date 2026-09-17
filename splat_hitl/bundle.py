@@ -146,6 +146,16 @@ class SceneBundle:
     def blockmap(self) -> BlockMap:
         return BlockMap.load(self._require("map"))
 
+    def pointcloud_xyz(self, max_points=None) -> np.ndarray:
+        """Vertex positions of the declared point cloud, in SPLAT units.
+
+        Splat units, not metres: it is the same frame the splat and the ESDF
+        are in, and converting here would hide which frame the caller is
+        holding. `vicon_transform` turns it into the lab frame.
+        """
+        from .pointcloud import read_xyz
+        return read_xyz(self._require("pointcloud"), max_points=max_points)
+
     def task(self) -> dict:
         with open(self._require("task")) as fh:
             return json.load(fh)
