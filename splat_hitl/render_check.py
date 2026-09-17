@@ -54,7 +54,23 @@ from .frames import SplatTransform, matrix_to_rpy, rpy_to_matrix
 from .renderer import SplatWorkerClient
 from .sensor import SensorModel
 
-__all__ = ["write_png", "sphere_trace", "standoff_poses"]
+__all__ = ["write_png", "sphere_trace", "standoff_poses", "centre_depth_m"]
+
+
+def centre_depth_m(obs, half: int = 2) -> float:
+    """Median depth over a small patch at the middle of the frame.
+
+    A single centre pixel on a 96 x 64 image is one 0.6-degree sample and a
+    splat is speckly; the median of a patch is the same measurement without the
+    coin flip. Reads `Observation.depth_m` -- always metres, whatever rendered
+    it -- and exists as a function so that the field name is pinned by a test
+    rather than by the first run on a GPU machine.
+    """
+    d = np.asarray(obs.depth_m, dtype=float)
+    h, w = d.shape[:2]
+    patch = d[max(h // 2 - half, 0):h // 2 + half + 1,
+              max(w // 2 - half, 0):w // 2 + half + 1]
+    return float(np.median(patch))
 
 
 # ----------------------------------------------------------------- PNG output
@@ -213,15 +229,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         for name, cam, yaw, expect in standoff_poses(bmap, a.standoff_m):
             pos_m, rpy = _vicon_pose_to_worker(tf, cam, yaw)
             obs = client.render(pos_m, rpy)
-            d = obs.depth
-            h, w = d.shape
-            patch = d[h // 2 - 2:h // 2 + 3, w // 2 - 2:w // 2 + 3]
-            centre = float(np.median(patch))
+            d = obs.depth_m
+            centre = centre_depth_m(obs)
             fwd = tf.R @ np.array([math.cos(yaw), math.sin(yaw), 0.0])
             traced = sphere_trace(
                 esdf, tf.point_to_splat(cam).reshape(3) * tf.metres_per_unit, fwd)
             err = centre - expect
-            rows.append((name, expect, centre, traced, err, obs.latency_s))
+            rows.append((name, expect, centre, traced, err, obs.render_s))
             if abs(err) > a.tolerance_m:
                 bad += 1
             if a.out:

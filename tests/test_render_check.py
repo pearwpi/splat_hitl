@@ -14,9 +14,11 @@ import pytest
 from splat_hitl.blockmap import BlockMap
 from splat_hitl.collision import synthetic_room
 from splat_hitl.frames import SplatTransform
-from splat_hitl.render_check import (depth_to_rgb, sphere_trace,
-                                     standoff_poses, write_png,
+from splat_hitl.render_check import (centre_depth_m, depth_to_rgb,
+                                     sphere_trace, standoff_poses, write_png,
                                      _vicon_pose_to_worker)
+from splat_hitl.renderer import FakeRenderer
+from splat_hitl.sensor import SensorModel
 
 
 # ------------------------------------------------------------------- the ray
@@ -156,3 +158,25 @@ def test_near_is_bright_and_nothing_is_black():
     assert v[0, 0] == pytest.approx(1.0)
     assert v[0, 1] > v[0, 2]
     assert v[0, 2] == 0.0 and v[0, 3] == 0.0
+
+
+# ------------------------------------------- the Observation fields we rely on
+def test_centre_depth_reads_a_real_observation():
+    """Observation calls them depth_m and render_s, not depth and latency_s.
+    Getting that wrong is an AttributeError on the first frame of a run that
+    only happens on a GPU machine, so it is pinned here instead."""
+    sensor = SensorModel(name="t", width=32, height=24, fov_x_deg=60.0)
+    f = FakeRenderer(sensor, room_size_m=(4.0, 3.0, 2.5))
+    obs = f.render([2.0, 1.5, 1.25], [0.0, 0.0, 0.0])
+    assert obs.depth_m.shape == (24, 32)
+    assert obs.render_s >= 0.0
+    # looking along +x from the middle of a 4 m room: 2 m of wall ahead
+    assert centre_depth_m(obs) == pytest.approx(2.0, abs=0.05)
+
+
+def test_centre_depth_is_a_median_not_one_pixel():
+    class _Obs:
+        depth_m = np.full((9, 9), 5.0)
+    _Obs.depth_m[4, 4] = 99.0            # one speckle at the exact centre
+    assert centre_depth_m(_Obs()) == pytest.approx(5.0)
+
