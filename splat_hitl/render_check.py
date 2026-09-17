@@ -54,7 +54,8 @@ from .frames import SplatTransform, matrix_to_rpy, rpy_to_matrix
 from .renderer import SplatWorkerClient
 from .sensor import SensorModel
 
-__all__ = ["write_png", "sphere_trace", "standoff_poses", "centre_depth_m"]
+__all__ = ["write_png", "sphere_trace", "standoff_poses", "centre_depth_m",
+           "mirror_error_m"]
 
 
 def centre_depth_m(obs, half: int = 2) -> float:
@@ -163,6 +164,48 @@ def standoff_poses(bmap: BlockMap, standoff_m: float = 1.0
     return out
 
 
+def mirror_error_m(obs, esdf, tf, cam_vicon_m, yaw_rad, sensor,
+                   columns: int = 9) -> Tuple[float, float]:
+    """(error as rendered, error if left-right mirrored), in metres.
+
+    A mirrored frame reads the SAME depth at the centre of the image, and keeps
+    the floor at the bottom, so neither the standoff check nor a human looking
+    at the picture can rule it out. `splat_rendering.py` carries --flip-lr
+    because someone has been caught by it before.
+
+    So trace a fan of rays through the middle row of pixels and compare each
+    against the depth actually rendered there. An unmirrored image matches; a
+    mirrored one matches its own reflection instead, and the two numbers say
+    which by a wide margin.
+    """
+    from .renderer import _CAM_TO_BODY
+    k = sensor.intrinsics()
+    d = np.asarray(obs.depth_m, dtype=float)
+    h, w = d.shape[:2]
+    row = d[h // 2]
+    R = tf.rotation_to_splat(rpy_to_matrix(0.0, 0.0, float(yaw_rad))) @ _CAM_TO_BODY
+    origin = tf.point_to_splat(cam_vicon_m).reshape(3) * tf.metres_per_unit
+    us = np.linspace(w * 0.12, w * 0.88, columns)
+    traced, seen = [], []
+    for u in us:
+        ray = np.array([(u - k["cx"]) / k["fx"], 0.0, 1.0])
+        t = sphere_trace(esdf, origin, R @ ray)
+        if not np.isfinite(t):
+            continue
+        # sphere_trace walks along the ray, so its answer is a RANGE; the
+        # renderer's depth is a range too (gsplat returns distance along z of
+        # the normalised ray), so no cos correction is applied here.
+        traced.append(t)
+        seen.append(int(round(u)))
+    if len(traced) < 3:
+        return float("nan"), float("nan")
+    got = np.array([row[i] for i in seen], dtype=float)
+    flipped = np.array([row[w - 1 - i] for i in seen], dtype=float)
+    traced = np.array(traced)
+    return (float(np.mean(np.abs(got - traced))),
+            float(np.mean(np.abs(flipped - traced))))
+
+
 def _vicon_pose_to_worker(tf: SplatTransform, p_vicon_m, yaw_vicon_rad):
     """(position in SPLAT METRES, body rpy in the splat frame).
 
@@ -224,7 +267,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if a.out:
         os.makedirs(a.out, exist_ok=True)
 
-    rows, bad = [], 0
+    rows, bad, mirrored = [], 0, []
     try:
         for name, cam, yaw, expect in standoff_poses(bmap, a.standoff_m):
             pos_m, rpy = _vicon_pose_to_worker(tf, cam, yaw)
@@ -235,6 +278,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             traced = sphere_trace(
                 esdf, tf.point_to_splat(cam).reshape(3) * tf.metres_per_unit, fwd)
             err = centre - expect
+            asis, flip = mirror_error_m(obs, esdf, tf, cam, yaw, sensor)
+            mirrored.append((asis, flip))
             rows.append((name, expect, centre, traced, err, obs.render_s))
             if abs(err) > a.tolerance_m:
                 bad += 1
@@ -252,6 +297,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
               % (name, expect, centre, traced, err * 1000.0, lat * 1000.0))
     print("\n%d of %d poses within %.0f mm of the tape"
           % (len(rows) - bad, len(rows), a.tolerance_m * 1000))
+
+    good = [(x, y) for x, y in mirrored if np.isfinite(x) and np.isfinite(y)]
+    if good:
+        asis = float(np.mean([x for x, _ in good]))
+        flip = float(np.mean([y for _, y in good]))
+        print("\nleft-right: as rendered %.0f mm from the ESDF across the row, "
+              "mirrored %.0f mm" % (asis * 1000, flip * 1000))
+        if flip < asis:
+            print("  !! the MIRRORED image fits the scene better. The frame is "
+                  "flipped left-right; the worker takes --flip-lr.")
+            bad += 1
+        else:
+            print("  the image as rendered fits, by %.1fx. Not mirrored."
+                  % (flip / max(asis, 1e-6)))
     if a.out:
         print("frames written to %s" % a.out)
     return 1 if bad else 0

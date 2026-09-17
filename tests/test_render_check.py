@@ -19,7 +19,8 @@ from splat_hitl.blockmap import BlockMap
 from splat_hitl.collision import synthetic_room
 from splat_hitl.frames import SplatTransform
 from splat_hitl.render_check import (centre_depth_m, depth_to_rgb,
-                                     sphere_trace, standoff_poses, write_png,
+                                     mirror_error_m, sphere_trace,
+                                     standoff_poses, write_png,
                                      _vicon_pose_to_worker)
 from splat_hitl.frames import rpy_to_matrix
 from splat_hitl.renderer import FakeRenderer, SplatWorkerClient
@@ -281,4 +282,51 @@ def test_a_downward_mount_tilts_the_camera_down(tmp_path):
         @ np.array([0.0, 0.0, -1.0])
     assert fwd == pytest.approx([np.cos(np.radians(30.0)), 0.0,
                                  -np.sin(np.radians(30.0))], abs=1e-9)
+
+
+# ------------------------------------------------------- left-right mirroring
+#: Deliberately OFF the room's centre line, because a symmetric scene looks the
+#: same in a mirror and would make this test pass whatever the code did.
+_OBSTACLE = [{"centre": (3.0, 0.6, 1.25), "radius": 0.35}]
+_ROOM = (4.0, 3.0, 2.5)
+
+
+def _mirror_case():
+    sensor = SensorModel(name="t", width=65, height=49, fov_x_deg=70.0)
+    r = FakeRenderer(sensor, _ROOM, obstacles=_OBSTACLE)
+    obs = r.render([1.0, 1.5, 1.25], [0.0, 0.0, 0.0])
+    esdf = synthetic_room(_ROOM, obstacles=_OBSTACLE)
+    tf = SplatTransform.identity_metres(1.0)
+    return obs, esdf, tf, sensor
+
+
+def test_an_unmirrored_frame_is_recognised_as_unmirrored():
+    obs, esdf, tf, sensor = _mirror_case()
+    asis, flip = mirror_error_m(obs, esdf, tf, [1.0, 1.5, 1.25], 0.0, sensor)
+    assert np.isfinite(asis) and np.isfinite(flip)
+    assert asis < flip
+
+
+def test_a_mirrored_frame_is_caught():
+    """The whole point: this is invisible to the centre-depth check and to a
+    human looking at the picture, because the floor stays at the bottom."""
+    obs, esdf, tf, sensor = _mirror_case()
+
+    class _Flipped:
+        depth_m = np.ascontiguousarray(obs.depth_m[:, ::-1])
+    asis, flip = mirror_error_m(_Flipped(), esdf, tf, [1.0, 1.5, 1.25], 0.0,
+                                sensor)
+    assert flip < asis
+
+
+def test_a_symmetric_scene_cannot_settle_it_and_that_is_expected():
+    """Stated so nobody reads a near-tie as a pass. Down the centre line of an
+    empty room the two numbers are the same by construction."""
+    sensor = SensorModel(name="t", width=65, height=49, fov_x_deg=70.0)
+    r = FakeRenderer(sensor, _ROOM)
+    obs = r.render([1.0, 1.5, 1.25], [0.0, 0.0, 0.0])
+    asis, flip = mirror_error_m(obs, synthetic_room(_ROOM),
+                                SplatTransform.identity_metres(1.0),
+                                [1.0, 1.5, 1.25], 0.0, sensor)
+    assert abs(asis - flip) < 1e-6
 
