@@ -6,7 +6,11 @@ produces the second opinion, the pose conversion between the two units the
 worker and the transform disagree about, and the PNG writer.
 """
 import struct
+import subprocess
+import sys
 import zlib
+
+import json
 
 import numpy as np
 import pytest
@@ -17,7 +21,8 @@ from splat_hitl.frames import SplatTransform
 from splat_hitl.render_check import (centre_depth_m, depth_to_rgb,
                                      sphere_trace, standoff_poses, write_png,
                                      _vicon_pose_to_worker)
-from splat_hitl.renderer import FakeRenderer
+from splat_hitl.frames import rpy_to_matrix
+from splat_hitl.renderer import FakeRenderer, SplatWorkerClient
 from splat_hitl.sensor import SensorModel
 
 
@@ -179,4 +184,101 @@ def test_centre_depth_is_a_median_not_one_pixel():
         depth_m = np.full((9, 9), 5.0)
     _Obs.depth_m[4, 4] = 99.0            # one speckle at the exact centre
     assert centre_depth_m(_Obs()) == pytest.approx(5.0)
+
+
+# ------------------------------------------------ the worker protocol, faked
+#: Speaks exactly what splat_rendering.py speaks, returns a CONSTANT depth in
+#: NORMALISED units, and records every request. Both bugs the first GPU run
+#: found -- depth never converted to metres, and the body attitude handed over
+#: unrotated so the camera rendered the floor -- are visible from here, with no
+#: CUDA and no scene.
+FAKE_WORKER = """
+import sys, json, base64
+import numpy as np
+log, scale, value = sys.argv[1], float(sys.argv[2]), float(sys.argv[3])
+print(json.dumps({"ready": True, "scale_to_metres": scale, "backend": "fake"}),
+      flush=True)
+seen = []
+for line in sys.stdin:
+    r = json.loads(line)
+    if r.get("cmd") == "close":
+        break
+    seen.append(r)
+    h, w = int(r["image_height"]), int(r["image_width"])
+    d = np.full((h, w), value, dtype=np.float32)
+    rgb = np.zeros((h, w, 3), dtype=np.float32)
+    print(json.dumps({"ok": True, "shape": [h, w],
+                      "depth_b64": base64.b64encode(d.tobytes()).decode(),
+                      "rgb_shape": [h, w, 3],
+                      "rgb_b64": base64.b64encode(rgb.tobytes()).decode()}),
+          flush=True)
+open(log, "w").write(json.dumps(seen))
+"""
+
+SCALE = 3.3082
+
+
+def _fake_client(tmp_path, value=0.25, sensor=None):
+    script = tmp_path / "fake_worker.py"
+    script.write_text(FAKE_WORKER)
+    log = tmp_path / "seen.json"
+    sensor = sensor or SensorModel(name="t", width=8, height=6, fov_x_deg=60.0)
+    client = SplatWorkerClient(sensor, [sys.executable, str(script), str(log),
+                                        str(SCALE), str(value)])
+    return client, log
+
+
+def test_depth_comes_back_in_metres_not_normalised_units(tmp_path):
+    """The worker rasterises in the splat's own frame, so its depth is
+    normalised -- as its own empty_depth, a metre value divided by the scale,
+    confirms. Forwarding that untouched is a renderer that says 0.2 for a box
+    1.0 m away."""
+    client, _ = _fake_client(tmp_path, value=0.25)
+    try:
+        obs = client.render([0.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+    finally:
+        client.close()
+    assert obs.depth_m == pytest.approx(0.25 * SCALE)
+
+
+def test_the_worker_is_handed_normalised_positions(tmp_path):
+    client, log = _fake_client(tmp_path)
+    try:
+        client.render([1.0, 2.0, 3.0], [0.0, 0.0, 0.0])
+    finally:
+        client.close()
+    seen = json.loads(log.read_text())
+    assert seen[0]["position"] == pytest.approx(np.array([1.0, 2.0, 3.0]) / SCALE)
+
+
+@pytest.mark.parametrize("yaw", [0.0, 0.7, -2.0, np.pi])
+def test_the_camera_looks_where_the_body_faces(tmp_path, yaw):
+    """At rpy = 0 the worker's camera looks along world -Z. Hand it a body
+    attitude unrotated and every frame is of the floor."""
+    client, log = _fake_client(tmp_path)
+    try:
+        client.render([0.0, 0.0, 0.0], [0.0, 0.0, yaw])
+    finally:
+        client.close()
+    rpy = json.loads(log.read_text())[0]["orientation_rpy"]
+    R = rpy_to_matrix(*rpy)
+    assert R @ np.array([0.0, 0.0, -1.0]) == pytest.approx(
+        [np.cos(yaw), np.sin(yaw), 0.0], abs=1e-9)
+    assert R @ np.array([0.0, 1.0, 0.0]) == pytest.approx([0, 0, 1.0], abs=1e-9)
+
+
+def test_a_downward_mount_tilts_the_camera_down(tmp_path):
+    """mount_pitch_deg is positive DOWN, and it has to survive the change of
+    basis rather than being cancelled by it."""
+    sensor = SensorModel(name="t", width=8, height=6, fov_x_deg=60.0,
+                         mount_pitch_deg=30.0)
+    client, log = _fake_client(tmp_path, sensor=sensor)
+    try:
+        client.render([0.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+    finally:
+        client.close()
+    fwd = rpy_to_matrix(*json.loads(log.read_text())[0]["orientation_rpy"]) \
+        @ np.array([0.0, 0.0, -1.0])
+    assert fwd == pytest.approx([np.cos(np.radians(30.0)), 0.0,
+                                 -np.sin(np.radians(30.0))], abs=1e-9)
 

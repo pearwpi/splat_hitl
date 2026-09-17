@@ -9,16 +9,32 @@ downstream talks to `RendererClient`, and `FakeRenderer` -- pure numpy, no
 assets -- stands in for it. The loop, the scoring, the safety logic and the
 command mapping are then all provable on a laptop.
 
-UNITS, WHICH THE WORKER GETS ASYMMETRICALLY WRONG
---------------------------------------------------
+UNITS: THE WORKER IS NORMALISED ON BOTH SIDES
+---------------------------------------------
 `metric-splat`'s `splat_rendering.py` worker wants POSITIONS IN NORMALISED
-SCENE UNITS and returns DEPTH IN METRES. That asymmetry is real, it is easy to
-get wrong, and it is the kind of thing an interface exists to absorb:
+SCENE UNITS and returns DEPTH IN NORMALISED SCENE UNITS TOO -- gsplat rasterises
+in the splat's own frame, and the worker's own `empty_depth` is a metre value
+divided by `scale_to_metres` to match. This docstring used to claim the depth
+came back in metres. It does not, and `render_check` caught it by rendering a
+box 1.0 m away and being told 0.2.
 
     RendererClient.render(position_m, body_rpy)  ->  depth in METRES
 
-`SplatWorkerClient` divides by `scale_to_metres` on the way in. Nothing above
-this layer sees a normalised coordinate.
+`SplatWorkerClient` divides on the way in and multiplies on the way out.
+Nothing above this layer sees a normalised coordinate.
+
+THE WORKER'S CAMERA IS NOT THE DRONE'S BODY
+-------------------------------------------
+`viewmat_for_gsplat` builds `to_cv @ R.T` from the rpy it is handed, so at
+rpy = 0 its camera looks along world -Z -- STRAIGHT DOWN -- with +X to the
+right and +Y up. A body frame is FLU: forward +X, left +Y, up +Z. Hand the
+worker a body attitude unrotated and you render the floor, which is what
+`render_check` found: every depth came back as the camera's own height.
+
+`WORKER_CAMERA_BASIS` is the fixed change of basis between the two. The
+visualiser in `splat_rendering.py` spells the same thing as a base roll of
+pi/2 with yaw offset by -pi/2; this is that rotation, written once, where the
+protocol is.
 
 THE MOUNT IS APPLIED HERE, ONCE
 -------------------------------
@@ -86,12 +102,20 @@ class RendererClient(ABC):
         """Body attitude composed with the fixed mount rotation.
 
         `mount_pitch_deg` is POSITIVE DOWN, which is how people describe a
-        camera mount and the opposite of the right-handed pitch sign, so the
-        rotation is built from the negated angle.
+        camera mount -- and in a FLU body frame that is ALSO the right-handed
+        sign, because a positive rotation about +Y (left) tilts +X (forward)
+        towards -Z (down). This used to negate the angle, on the aerospace
+        convention where +Y is right and +Z is down and positive pitch is
+        nose-UP. That is not the frame anything else here uses, so a mount
+        documented as 10 degrees down pointed 10 degrees up.
+
+        The two tests that covered it rendered from the exact mid-height of a
+        symmetric room, where the floor and the ceiling are the same distance
+        away and the sign cannot be seen. They render off-centre now.
         """
         r, p, y = (float(v) for v in body_rpy)
         R_body = rpy_to_matrix(r, p, y)
-        R_mount = rpy_to_matrix(0.0, -math.radians(self.sensor.mount_pitch_deg),
+        R_mount = rpy_to_matrix(0.0, math.radians(self.sensor.mount_pitch_deg),
                                 math.radians(self.sensor.mount_yaw_deg))
         return matrix_to_rpy(R_body @ R_mount)
 
@@ -227,6 +251,14 @@ class FakeRenderer(RendererClient):
 
 
 # ------------------------------------------------------------------- worker
+#: The worker's camera axes in body FLU. It is OpenGL where `_CAM_TO_BODY` is
+#: OpenCV -- same right, opposite up and forward -- so it is that constant with
+#: y and z negated rather than a second independent claim about the convention.
+#: Works out to rotation_matrix_from_rpy([pi/2, 0, -pi/2]), which is the base
+#: roll the metric-splat visualiser applies by hand and the worker does not.
+WORKER_CAMERA_BASIS = _CAM_TO_BODY @ np.diag([1.0, -1.0, -1.0])
+
+
 class SplatWorkerClient(RendererClient):
     """Client for `metric-splat`'s `splat_rendering.py` subprocess worker.
 
@@ -270,7 +302,8 @@ class SplatWorkerClient(RendererClient):
     def render(self, position_m, body_rpy) -> Observation:
         t0 = time.perf_counter()
         p = np.asarray(position_m, dtype=float).reshape(3) / self.scale_to_metres
-        rpy = self.camera_rpy(body_rpy)
+        rpy = matrix_to_rpy(rpy_to_matrix(*self.camera_rpy(body_rpy))
+                            @ WORKER_CAMERA_BASIS)
         req = {"position": p.tolist(),
                "orientation_rpy": [float(v) for v in rpy],
                "image_width": int(self.sensor.width),
@@ -284,6 +317,7 @@ class SplatWorkerClient(RendererClient):
         h, w = resp["shape"]
         depth = np.frombuffer(base64.b64decode(resp["depth_b64"]),
                               dtype=np.float32).reshape(h, w)
+        depth = depth.astype(float) * self.scale_to_metres   # normalised -> m
         rgb = None
         if resp.get("rgb_b64"):
             rgb = np.frombuffer(base64.b64decode(resp["rgb_b64"]),

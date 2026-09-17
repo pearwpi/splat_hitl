@@ -91,28 +91,43 @@ def test_looking_up_sees_the_ceiling():
 
 
 # ------------------------------------------------------------------- mount
+#: OFF the mid-height of the room ON PURPOSE. At MID the floor and the ceiling
+#: are both 1.25 m away, so a mount pitched up and one pitched down give the
+#: same reading and the sign is invisible. From 0.50 m the floor is 0.50 m
+#: below and the ceiling 2.00 m above, and only one of them can be right.
+LOW = [2.0, 1.5, 0.5]
+
+
 def test_mount_pitch_is_positive_down():
-    """A camera pitched down must see the floor sooner than a level one."""
+    """A camera pitched down must see the FLOOR sooner than a level one."""
     level = FakeRenderer(sensor(mount_pitch_deg=0.0), ROOM)
     tilted = FakeRenderer(sensor(mount_pitch_deg=45.0), ROOM)
     c = (24, 32)
-    d_level = float(level.render(MID, [0, 0, 0]).depth_m[c])
-    d_tilt = float(tilted.render(MID, [0, 0, 0]).depth_m[c])
+    d_level = float(level.render(LOW, [0, 0, 0]).depth_m[c])
+    d_tilt = float(tilted.render(LOW, [0, 0, 0]).depth_m[c])
     assert d_tilt < d_level
-    # 45 deg down from 1.25 m up: range to the floor is 1.25 / sin(45)
-    assert abs(d_tilt - 1.25 * math.sqrt(2)) < 0.1
+    # 45 deg down from 0.50 m up: range to the floor is 0.50 / sin(45)
+    assert abs(d_tilt - 0.5 * math.sqrt(2)) < 0.05
+    # and emphatically NOT the ceiling, 2.00 m above
+    assert abs(d_tilt - 2.0 * math.sqrt(2)) > 1.0
 
 
 def test_mount_pitch_of_ninety_looks_straight_down():
     r = FakeRenderer(sensor(mount_pitch_deg=90.0), ROOM)
-    centre = float(r.render(MID, [0, 0, 0]).depth_m[24, 32])
-    assert abs(centre - 1.25) < 0.05
+    centre = float(r.render(LOW, [0, 0, 0]).depth_m[24, 32])
+    assert abs(centre - 0.5) < 0.02          # the floor, not the 2.00 m ceiling
+
+
+def test_a_negative_mount_pitch_looks_up():
+    r = FakeRenderer(sensor(mount_pitch_deg=-90.0), ROOM)
+    centre = float(r.render(LOW, [0, 0, 0]).depth_m[24, 32])
+    assert abs(centre - 2.0) < 0.02
 
 
 def test_camera_rpy_composes_body_and_mount():
     r = FakeRenderer(sensor(mount_pitch_deg=10.0), ROOM)
     rpy = r.camera_rpy([0.0, 0.0, 0.0])
-    assert abs(math.degrees(rpy[1]) + 10.0) < 1e-6    # pitch down is negative
+    assert abs(math.degrees(rpy[1]) - 10.0) < 1e-6    # FLU: pitch down is +ve
     assert abs(rpy[0]) < 1e-9 and abs(rpy[2]) < 1e-9
 
 
