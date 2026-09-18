@@ -1,8 +1,8 @@
 # Pipeline status
 
-Updated **2026-09-08**. Supersedes the 2026-09-03 version, which listed as
-missing several things that turned out to exist and several that turned out to
-be built wrong.
+Updated **2026-09-17**. The critical path in §4 is closed: Vicon → policy →
+command → radio → drone executed end to end, 5.12 m past four physical
+obstacles, tracked to 32 mm rms. Supersedes the 2026-09-08 version.
 
 **Scope, fixed:**
 
@@ -66,6 +66,42 @@ at +20 mm and is far out on an arm.
 These are model numbers. The acceptance test is empirical: build it, re-teach
 the Tracker object, then fly and watch `track_monitor.py`.
 
+### 2026-09-17, `crazyflie_a2` — the evidence now contradicts itself
+
+The rebuilt 8-marker body was bench-tested with `spin_test.py`, motors audibly
+running, all 8 markers visible at every level:
+
+| throttle | flips | peak deg/s | yaw sd |
+|---|---|---|---|
+| 0.0 % | **2** | 21 647 | 3.14 |
+| 7.5 % | 0 | 661 | 1.07 |
+| 15.0 % | 0 | 746 | 1.06 |
+| 22.5 % | 0 | 702 | 1.05 |
+| 30.0 % | **2** | 23 025 | 4.29 |
+| 37.5 % | **4** | 27 286 | 4.28 |
+| 45.0 % | 0 | 748 | 1.08 |
+
+FAIL, with no monotonic relationship to throttle — it flips with the motors
+stopped, so the ambiguity is present **at rest**, not merely under vibration.
+The driver independently logged a 93° single-frame jump the same minute.
+
+Yet three flights that evening — a 15.4 s teleop hover, a 40.6 s HITL hover and
+a 26.6 s A2 run — logged **zero** yaw rejects between them. The 148 rejects in
+the crashed run all fall in the last 0.56 s, after ground contact, with the
+airframe lying at an angle.
+
+Those two observations do not reconcile, and until they do the body is
+mitigated rather than fixed: `cf_core.flip_check` keeps a flipped quaternion
+out of the EKF and `splat_hitl.ros_node.is_solver_flip` keeps it out of the
+policy. Next step is the `crazyflie_a2` `.vsk` through `marker_geom.py`, which
+names the symmetry family and its margin from marker positions alone and needs
+no lab time.
+
+One asymmetry worth noting: `spin_test.py`'s own docstring says props-off
+vibration is weaker than props-on, so a PASS there does not clear a body. The
+2026-09-17 data is the inverse case, which the docstring does not cover — a
+bench FAIL that flight does not reproduce.
+
 ---
 
 ## 3. Built and tested
@@ -109,12 +145,41 @@ command → radio → drone, which has never once executed end to end.
    2-7 ms per frame after warm-up, against a 66 ms budget at 15 Hz. Not
    mirrored, by 22.5x. Getting there cost three real bugs -- normalised depth,
    camera basis, mount sign -- none of which raised an error.
-4. `--yaw-sign` props off. *(lab, 10 min)*
-5. `HoverPolicy` HITL flight. *(lab)*
+4. ~~`--yaw-sign` props off.~~ Not a blocker and not a props-off test.
+   `yaw_sign` is applied only in `_send_position`, so it touches takeoff, land
+   and hold; the cruise goes through `cmd_hover`, where `yaw_rate` is
+   sign-flipped separately. Verifying it needs the drone able to rotate, so it
+   needs props on. Started at yaw −3.4°, a wrong sign would have commanded a
+   6.8° rotation during the climb.
+5. ~~`HoverPolicy` HITL flight.~~ Done 2026-09-17. 610 steps over 40.6 s at
+   15.0 Hz, zero yaw rejects. Held 0.804 m ± 22 mm and −5.6° ± 1.6°, and
+   drifted 0.9 m in x — which is correct: `HoverPolicy` commands zero *velocity*
+   and closes no position loop, so a couple of cm/s of EKF velocity bias
+   integrates. A velocity contract is not a position contract.
+6. ~~A2 reference policy, full trajectory.~~ Done 2026-09-17. 400 steps, 5.12 m
+   at a 0.5 m/s cruise, 32 mm rms / 90 mm peak planar error, 0.809 m ± 12 mm
+   altitude, stopping 20 mm from the goal. No command clamped, no mocap sample
+   rejected. Logs in `a2_reference/a2_hitl_run1.{json,csv}`.
 
-Flight-planning note: `yaw_mode="fixed"`, so the first flight commands zero yaw
-and the drone must hold its starting heading. The runtime drops to HOLDING past
-20° of drift — that is the guard working.
+Flight-planning note: `yaw_mode="fixed"`, so the flight commands zero yaw and
+the drone must hold its starting heading. The runtime drops to HOLDING past 20°
+of drift — that is the guard working, and it was observed working.
+
+**What the bring-up cost, and where.** Eight defects, none of them in tested
+code and all of them in the wiring between repositories: the driver never
+selected the Kalman estimator (the firmware sat on the complementary filter and
+discarded every injected pose, publishing barometric altitude above sea level);
+`bounds` declared with an empty-list default, which rclpy types as BYTE_ARRAY,
+killing the node *because* its geofence was configured; no `setup.cfg` in
+`crazyflie_ros`, so its console scripts never reached libexec and the ROS driver
+had never been launched anywhere; log blocks not stopped on shutdown, so each
+Ctrl-C poisoned the next connection; takeoff latching a possibly-rejected yaw;
+no solver-flip filter upstream of the policy; a config naming a Tracker object
+that does not exist; and a missing `import math`.
+
+**Still unproven on hardware:** the live splat worker *in the loop* — the flight
+used `FakeRenderer`, and `render_check` verified the worker separately — plus
+the ESDF collision monitor, gate scoring, and `TransformedPoseSource`.
 
 ### Then, for a student-ready assignment
 
