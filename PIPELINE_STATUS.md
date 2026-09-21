@@ -185,10 +185,29 @@ the ESDF collision monitor, gate scoring, and `TransformedPoseSource`.
 
 | | | size |
 |---|---|---|
-| `SplatEnv` in `splat_hitl` | the training environment. Students never see `MihirBhat`, so it has to live here. Reuses the contract, `ObservationBuilder`, `VelocityIntegrator`, `gates.py`, `collision.py`. New: dynamics, start sampling, reward, the Gym wrapper. | the biggest remaining build |
+| ~~`SplatEnv` in `splat_hitl`~~ | **Built.** `env.py` + `gym_env.py`: reset/step, both action kinds, gate rewards with progress shaping, the collision monitor, timeout, and a lazily-imported Gymnasium adapter. It imports the same `ObservationBuilder`, action stage and contract as the runtime, so parity is structural rather than policed. What it does NOT have is attitude — see below. | done |
 | Render worker container image | from `splat_rendering.py`. Keeps torch/gsplat/CUDA out of `splat_hitl`, which is numpy-only and should stay that way | packaging |
 | Student guide | drone care, marker placement and verification, Tracker object, radio checks, `ROS_DOMAIN_ID` per team, preflight, splat_hitl usage | the big writing job |
 | Operations doc | scheduling, supervision, LiPo, spares | small, not optional |
+
+**What the sim does not model, and what that costs per assignment.** The
+dynamics are a velocity envelope, integrated — no attitude loop, no drag, no
+rotor dynamics, no ground effect, and a commanded velocity is reached instantly.
+For A2 that is honest and was validated on 2026-09-17: the real drone tracked
+the cruise BETTER than the sim (6–24 mm against a 33 mm steady lag), so the sim
+is not flattering the controller. Its optimism is on the profile's ramps, 34 mm
+simulated against 90 mm flown.
+
+For A3 and A5 two of those omissions start to matter:
+
+- **The camera never tilts.** `env._observe()` poses the render with yaw only.
+  A real drone pitches to accelerate, so a vision policy trains on level images
+  and flies on tilted ones. A point mass's tilt is *determined* by its
+  commanded acceleration, so this is recoverable exactly, without any rotor
+  model.
+- **There is no dead time.** Mocap latency, the control period, radio transit
+  and the firmware's own response are all zero in sim. A reactive gate policy
+  is exactly the kind that oscillates when that is wrong.
 
 Training throughput is **not** a blocker: measured 150–240 env-steps/s on the
 single subprocess renderer, 2 M steps in 2.8 h. The unmerged batched-rendering
