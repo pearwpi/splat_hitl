@@ -151,14 +151,19 @@ noise. Train on real or Blender-rendered imagery and use this for the plumbing.
 ## 3. Training
 
 ```python
+import os
+
 from splat_hitl.env import SplatEnv, EnvConfig
 from splat_hitl.renderer import SplatWorkerClient
 
 # The worker command is a list, and it runs in its own interpreter: nerfstudio
 # and gsplat cannot share a dependency tree with your policy stack.
-WORKER = ["python3", "splat_rendering.py", "--worker",
+WORKER = ["python3", "splat_rendering.py",
           "--backend", "cleaned-splat",
           "--splat", bundle.path("splat"),
+          "--splat-config", os.path.join(bundle.root, "nerfstudio_config.yml"),
+          "--transforms-json", os.path.join(bundle.root, "capture_transforms.json"),
+          "--scale-to-metres", "%.6f" % bundle.transform().metres_per_unit,
           "--empty-depth-raw-m", "4.0"]
 renderer = SplatWorkerClient(contract.observation.sensor, WORKER)
 env = SplatEnv(contract, renderer, course, esdf,
