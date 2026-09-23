@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -48,6 +49,8 @@ import numpy as np
 from .blockmap import BlockMap
 from .collision import AIRFRAME_RADIUS_M, ESDF
 from .contract import PolicyContract
+from .anchors import AnchorDrift, AnchorSet
+from .anchors import drift as anchor_drift
 from .frames import SplatTransform
 from .gates import GateCourse
 
@@ -78,6 +81,7 @@ _FILES = {
     "scene_calibration": False,  # render orientation
     "dataparser_transforms": False,  # scale_to_metres provenance
     "vicon_transform": False,  # Vicon -> splat registration. Needed to FLY.
+    "anchors": False,          # the fixed room points that registration was fitted to
 }
 
 
@@ -167,6 +171,38 @@ class SceneBundle:
         p = self.path("vicon_transform")
         return None if p is None else SplatTransform.load(p)
 
+    def anchors(self) -> Optional[AnchorSet]:
+        """The fixed room points this scene's registration was fitted to."""
+        p = self.path("anchors")
+        return None if p is None else AnchorSet.load(p)
+
+    def drift(self, measured) -> AnchorDrift:
+        """Compare a fresh anchor reading against the registration's.
+
+        `measured` is an AnchorSet, or anything AnchorSet takes: the same
+        physical points as Vicon reports them today. The result says how far
+        the world frame has moved since this bundle was built, and
+        `.apply(bundle.transform())` gives the transform to fly with.
+        """
+        ref = self.anchors()
+        if ref is None:
+            raise ValueError(
+                "%s declares no anchors, so a frame change cannot be detected. "
+                "Add the anchor positions the registration was fitted to."
+                % self.name)
+        if not isinstance(measured, AnchorSet):
+            measured = (AnchorSet.from_dict(measured)
+                        if isinstance(measured, dict) and "anchors" in measured
+                        else AnchorSet(dict(measured)))
+        return anchor_drift(ref, measured)
+
+    def transform_for(self, measured) -> SplatTransform:
+        """This scene's transform, corrected for where the Vicon frame is now."""
+        tf = self.transform()
+        if tf is None:
+            raise ValueError("%s has no vicon_transform to correct" % self.name)
+        return self.drift(measured).apply(tf)
+
     # -- the part that matters ---------------------------------------------
     def check(self, clearance_m: float = 0.10) -> BundleReport:
         """Verify the parts against EACH OTHER, not just that they exist."""
@@ -182,6 +218,11 @@ class SceneBundle:
                     r.notes.append(
                         "no vicon_transform: fine for training, but this bundle "
                         "cannot be FLOWN until the registration exists")
+                elif key == "anchors" and files.get("vicon_transform"):
+                    r.notes.append(
+                        "no anchors: this bundle cannot tell whether the Vicon "
+                        "frame has moved since it was registered, and a frame "
+                        "that moves is silent -- see splat_hitl.anchors")
                 elif key == "gates":
                     r.notes.append(
                         "no gates: this scene is not a race course. Its task, "
@@ -289,6 +330,30 @@ class SceneBundle:
                     "%.0f mm clearance: flying it correctly registers as a "
                     "collision" % (g.name, c.metres * 1000, clearance_m * 1000))
 
+        # -- does the ESDF hold the cloud it was built from? -------------------
+        # The scale test below is a PROXY for "these two came from different
+        # exports". When the bundle carries the crop the field was built from,
+        # that question can be measured instead of inferred: every splat in the
+        # crop must read as geometry. A bundle that passes this has matching
+        # exports whatever its capture believes about scale -- which matters,
+        # because a3_test's capture is 4.6% out and is not mismatched at all.
+        holds_cloud = None
+        if files.get("pointcloud"):
+            try:
+                xyz = self.pointcloud_xyz() * esdf.metres_per_unit
+                worst = max(esdf.at(q).metres for q in xyz[::max(1, len(xyz) // 5000)])
+            except Exception as exc:
+                r.warnings.append("point cloud unreadable: %r" % (exc,))
+            else:
+                limit = math.sqrt(3.0) * esdf.voxel_size_m + 1e-3   # one voxel diagonal
+                holds_cloud = worst <= limit
+                if not holds_cloud:
+                    r.errors.append(
+                        "the ESDF does not hold its own point cloud: a sampled "
+                        "splat reads %.0f mm from geometry, past the %.0f mm one "
+                        "voxel diagonal allows. They were built from different "
+                        "exports." % (worst * 1000.0, limit * 1000.0))
+
         # -- one scale, and which source wins ---------------------------------
         # The dataparser scale is the CAPTURE'S CLAIM about how big the room is.
         # The Vicon registration is a MEASUREMENT of the same room against a
@@ -308,12 +373,23 @@ class SceneBundle:
             else:
                 mpu = 1.0 / scale if scale else float("nan")
                 off = abs(mpu / esdf.metres_per_unit - 1.0)
-                if off > DATAPARSER_SCALE_TOL:
+                if off > DATAPARSER_SCALE_TOL and not holds_cloud:
                     r.errors.append(
                         "scale disagreement: dataparser_transforms implies "
                         "%.6f m per unit, the ESDF carries %.6f -- %.1f%% apart, "
                         "well past the %.0f%% that a capture's own scale error "
                         "explains. One was built from a different export."
+                        % (mpu, esdf.metres_per_unit, off * 100.0,
+                           DATAPARSER_SCALE_TOL * 100.0))
+                elif off > DATAPARSER_SCALE_TOL:
+                    r.warnings.append(
+                        "the capture claims %.6f m per unit and the ESDF carries "
+                        "%.6f -- %.1f%% apart, past the %.0f%% a capture's own "
+                        "scale error usually explains. It IS capture error and "
+                        "not two exports: the ESDF holds every sampled splat of "
+                        "its own point cloud. The measured value is the one to "
+                        "trust, and this capture is simply worse at guessing its "
+                        "own size than the others."
                         % (mpu, esdf.metres_per_unit, off * 100.0,
                            DATAPARSER_SCALE_TOL * 100.0))
                 elif off > 1e-3:
