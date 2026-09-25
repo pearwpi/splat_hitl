@@ -5,6 +5,7 @@ testable here is everything it would blame the worker for: the ray march that
 produces the second opinion, the pose conversion between the two units the
 worker and the transform disagree about, and the PNG writer.
 """
+import math
 import struct
 import subprocess
 import sys
@@ -20,7 +21,7 @@ from splat_hitl.collision import synthetic_room
 from splat_hitl.frames import SplatTransform
 from splat_hitl.render_check import (centre_depth_m, depth_to_rgb,
                                      mirror_error_m, sphere_trace,
-                                     standoff_poses, write_png,
+                                     poses_from_file, standoff_poses, write_png,
                                      _vicon_pose_to_worker)
 from splat_hitl.frames import rpy_to_matrix
 from splat_hitl.renderer import FakeRenderer, SplatWorkerClient
@@ -330,3 +331,46 @@ def test_a_symmetric_scene_cannot_settle_it_and_that_is_expected():
                                 [1.0, 1.5, 1.25], 0.0, sensor)
     assert abs(asis - flip) < 1e-6
 
+
+
+# -- poses for a scene with no map -------------------------------------------
+
+def _poses_file(tmp_path, obj):
+    p = tmp_path / "poses.json"
+    p.write_text(json.dumps(obj))
+    return str(p)
+
+
+def test_poses_come_back_in_the_shape_standoff_poses_uses(tmp_path):
+    (name, cam, yaw, expect), = poses_from_file(_poses_file(tmp_path, [
+        {"name": "panel_left", "camera_vicon_m": [3.6, 0.2, 1.2],
+         "yaw_deg": 90.0, "expect_m": 1.25}]))
+    assert name == "panel_left"
+    assert np.allclose(cam, [3.6, 0.2, 1.2])
+    assert yaw == pytest.approx(math.pi / 2)
+    assert expect == pytest.approx(1.25)
+
+
+def test_yaw_defaults_to_zero_and_a_name_is_invented(tmp_path):
+    (name, _, yaw, _), = poses_from_file(_poses_file(tmp_path, [
+        {"camera_vicon_m": [0, 0, 1], "expect_m": 1.0}]))
+    assert name == "pose0"
+    assert yaw == 0.0
+
+
+def test_a_wrapped_list_is_accepted(tmp_path):
+    poses = poses_from_file(_poses_file(tmp_path, {"_comment": "why", "poses": [
+        {"camera_vicon_m": [0, 0, 1], "expect_m": 1.0}]}))
+    assert len(poses) == 1
+
+
+def test_a_pose_missing_its_expected_depth_is_refused(tmp_path):
+    """Without it there is nothing to compare the render against, and a check
+    that cannot fail is worse than no check."""
+    with pytest.raises(SystemExit):
+        poses_from_file(_poses_file(tmp_path, [{"camera_vicon_m": [0, 0, 1]}]))
+
+
+def test_an_empty_file_is_refused(tmp_path):
+    with pytest.raises(SystemExit):
+        poses_from_file(_poses_file(tmp_path, []))

@@ -29,6 +29,25 @@ consistent AT ONCE. If it is not, the size of the error says which:
 
 Needs a CUDA gsplat, so it runs on the render machine, not on a laptop.
 
+WHERE THE POSES COME FROM
+-------------------------
+By default, off the -x face of every block in the bundle's map: chosen rather
+than sampled, so the expected reading is the standoff and nothing else.
+
+A RACE scene has no map. Axis-aligned blocks cannot describe a plate with a hole
+in it, so every gate scene in this project ships without one and this check used
+to be unavailable to exactly the scenes that fly fastest. `--poses FILE` supplies
+them instead:
+
+    [{"name": "panel_left", "camera_vicon_m": [3.6, 0.2, 1.2],
+      "yaw_deg": 0.0, "expect_m": 1.0}, ...]
+
+What makes a good pose is unchanged: a camera a known distance from something
+BIG, FLAT and SOLID whose position came off a tape measure rather than out of
+the splat. On a gate course that is the window panel, aimed away from its hole.
+Generating them needs to know what is in the scene, which this package does not,
+so that lives with the scene: see `captures/tools/render_poses.py`.
+
 THE SECOND OPINION
 ------------------
 The expected depth is also computed by sphere-tracing the bundle's own ESDF
@@ -164,6 +183,31 @@ def standoff_poses(bmap: BlockMap, standoff_m: float = 1.0
     return out
 
 
+def poses_from_file(path) -> List[Tuple[str, np.ndarray, float, float]]:
+    """Camera poses and their expected centre depth, from a JSON list.
+
+    Each entry is {name, camera_vicon_m, yaw_deg, expect_m}. `expect_m` is what
+    the depth at the centre of the image SHOULD read -- the distance to whatever
+    the camera is aimed at, measured some way that does not go through the splat.
+    """
+    with open(path) as fh:
+        raw = json.load(fh)
+    if isinstance(raw, dict):
+        raw = raw.get("poses", [])
+    out = []
+    for i, p in enumerate(raw):
+        try:
+            cam = np.asarray(p["camera_vicon_m"], dtype=float).reshape(3)
+            out.append((str(p.get("name", "pose%d" % i)), cam,
+                        math.radians(float(p.get("yaw_deg", 0.0))),
+                        float(p["expect_m"])))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise SystemExit("pose %d in %s: %r" % (i, path, exc))
+    if not out:
+        raise SystemExit("%s holds no poses" % path)
+    return out
+
+
 def mirror_error_m(obs, esdf, tf, cam_vicon_m, yaw_rad, sensor,
                    columns: int = 9) -> Tuple[float, float]:
     """(error as rendered, error if left-right mirrored), in metres.
@@ -240,6 +284,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     help="interpreter for the worker; it needs CUDA gsplat")
     ap.add_argument("--out", default=None, help="directory for the PNGs")
     ap.add_argument("--standoff-m", type=float, default=1.0)
+    ap.add_argument("--poses", default=None,
+                    help="JSON list of {name, camera_vicon_m, yaw_deg, expect_m}; "
+                         "use it when the scene has no map")
     ap.add_argument("--tolerance-m", type=float, default=0.10)
     a = ap.parse_args(argv)
 
@@ -253,7 +300,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("this bundle has no vicon_transform, so there is no lab frame to "
               "render from")
         return 1
-    bmap = BlockMap.load(b.path("map"))
+    if a.poses:
+        poses = poses_from_file(a.poses)
+    elif b.path("map") and os.path.exists(b.path("map")):
+        poses = standoff_poses(BlockMap.load(b.path("map")), a.standoff_m)
+    else:
+        print("this bundle has no map, so there are no blocks to stand off from. "
+              "Pass --poses with somewhere known to aim; captures/tools/"
+              "render_poses.py writes that file for a gate course.")
+        return 1
+    if not poses:
+        print("no usable poses")
+        return 1
     esdf = b.esdf()
     contract = b.contract()
     sensor = contract.observation.sensor
@@ -278,7 +336,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     rows, bad, mirrored = [], 0, []
     try:
-        for name, cam, yaw, expect in standoff_poses(bmap, a.standoff_m):
+        for name, cam, yaw, expect in poses:
             pos_m, rpy = vicon_pose_to_worker(tf, cam, yaw)
             obs = client.render(pos_m, rpy)
             d = obs.depth_m
