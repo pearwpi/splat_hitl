@@ -23,7 +23,8 @@ SPLAT_BYTES = b"not a real splat, and this module never parses one"
 def write_bundle(root, *, gate_centre=(2.0, 2.0, 0.6), scale=1.0,
                  esdf_mpu=1.0, voxel=0.05, truncation=1.0,
                  checksum=True, fingerprint=True, with_transform=False,
-                 drop=(), dataparser=True, map_lines=None, task=None):
+                 drop=(), dataparser=True, splat_frame=None, map_lines=None,
+                 task=None, splat_frame_key="metres_per_splat_unit"):
     root = str(root)
     os.makedirs(root, exist_ok=True)
     files = {}
@@ -52,6 +53,12 @@ def write_bundle(root, *, gate_centre=(2.0, 2.0, 0.6), scale=1.0,
         with open(os.path.join(root, "dataparser_transforms.json"), "w") as fh:
             json.dump({"scale": scale}, fh)
         files["dataparser_transforms"] = "dataparser_transforms.json"
+
+    if splat_frame is not None:
+        with open(os.path.join(root, "splat_frame.json"), "w") as fh:
+            json.dump({"scale": {splat_frame_key: float(splat_frame)},
+                       "gravity": {"nerfstudio_up_error_deg": 63.1}}, fh)
+        files["splat_frame"] = "splat_frame.json"
 
     if with_transform:
         SplatTransform.identity_metres(esdf_mpu).save(
@@ -287,3 +294,61 @@ def test_endpoints_in_open_space_pass(tmp_path):
                          "goal": [3.5, 3.5, 1.5]}]})).check()
     assert rep.ok, str(rep)
 
+
+
+# -- a COLMAP scene's metric scale has a different, better provenance ---------
+
+def test_no_dataparser_and_no_splat_frame_is_a_warning(tmp_path):
+    write_bundle(tmp_path, dataparser=False)
+    rep = SceneBundle.load(str(tmp_path)).check()
+    assert rep.ok
+    assert any("no provenance" in w for w in rep.warnings)
+
+
+def test_splat_frame_answers_for_the_scale_instead(tmp_path):
+    """A COLMAP capture ships splat_frame.json, not a dataparser scale.
+
+    Its dataparser scale is in COLMAP units and claims nothing about the room,
+    so omitting it is correct and the scene is not short of provenance -- it has
+    better provenance. That has to read as a note, not as a warning, or every
+    COLMAP scene carries a permanent complaint that says the opposite of what is
+    true.
+    """
+    write_bundle(tmp_path, dataparser=False, splat_frame=1.0, esdf_mpu=1.0)
+    rep = SceneBundle.load(str(tmp_path)).check()
+    assert rep.ok
+    assert not any("no provenance" in w for w in rep.warnings)
+    note = " ".join(rep.notes)
+    assert "COLMAP" in note and "63.1 deg from gravity" in note
+
+
+def test_splat_frame_reports_how_far_arkit_was_from_the_measurement(tmp_path):
+    write_bundle(tmp_path, dataparser=False, splat_frame=1.05, esdf_mpu=1.0)
+    rep = SceneBundle.load(str(tmp_path)).check()
+    assert rep.ok
+    assert "5.0%" in " ".join(rep.notes)
+
+
+def test_a_splat_frame_written_before_the_fold_still_reads(tmp_path):
+    """`metres_per_splat_unit_arkit` was the raw ARKit or dataparser claim, with the
+    pole-top fit's correction reported beside it and NOT applied. `splat_frame.py`
+    now folds that correction in and writes the corrected figure as
+    `metres_per_splat_unit`. Dropping the old key rather than keeping it as an
+    alias is deliberate -- a reader that has not been updated should fail loudly
+    instead of quietly using an uncorrected scale -- but frames already on disk,
+    a5_test's shipped one among them, still carry only the old name and must keep
+    working.
+    """
+    write_bundle(tmp_path, dataparser=False, splat_frame=1.05, esdf_mpu=1.0,
+                 splat_frame_key="metres_per_splat_unit_arkit")
+    rep = SceneBundle.load(str(tmp_path)).check()
+    assert rep.ok
+    assert "5.0%" in " ".join(rep.notes)
+
+
+def test_an_unreadable_splat_frame_is_a_warning(tmp_path):
+    write_bundle(tmp_path, dataparser=False, splat_frame=1.0)
+    with open(os.path.join(str(tmp_path), "splat_frame.json"), "w") as fh:
+        fh.write("{ this is not json")
+    rep = SceneBundle.load(str(tmp_path)).check()
+    assert any("splat_frame unreadable" in w for w in rep.warnings)

@@ -79,7 +79,8 @@ _FILES = {
     "pointcloud": False,       # reference geometry, for visualisation
     "constraints": False,      # motion planes, from the scene tools
     "scene_calibration": False,  # render orientation
-    "dataparser_transforms": False,  # scale_to_metres provenance
+    "dataparser_transforms": False,  # scale_to_metres provenance, ARKit/Polycam
+    "splat_frame": False,      # scale_to_metres provenance, COLMAP. See check()
     "vicon_transform": False,  # Vicon -> splat registration. Needed to FLY.
     "anchors": False,          # the fixed room points that registration was fitted to
 }
@@ -399,6 +400,36 @@ class SceneBundle:
                         "scale error, and the ESDF carries the value measured "
                         "against a tape, which is the one to trust."
                         % (mpu, esdf.metres_per_unit, off * 100.0))
+        elif self.path("splat_frame") and os.path.exists(self.path("splat_frame")):
+            # A COLMAP-solved capture has a dataparser scale, but it is in COLMAP's
+            # arbitrary units and claims nothing about the room -- it can be tens of
+            # percent from the truth without anything being wrong. Such a scene ships
+            # splat_frame.json instead, which records where level and scale actually
+            # came from. That is BETTER provenance than a dataparser scale, not worse,
+            # so it is a note.
+            try:
+                with open(self.path("splat_frame")) as fh:
+                    sf = json.load(fh)
+                # `metres_per_splat_unit` is the corrected figure, after the pole-top
+                # fit was folded back into the frame. Frames written before that
+                # iteration existed carry only the raw `..._arkit` claim.
+                mpu = float(sf["scale"].get("metres_per_splat_unit",
+                                            sf["scale"].get("metres_per_splat_unit_arkit")))
+                uperr = float(sf["gravity"]["nerfstudio_up_error_deg"])
+            except Exception as exc:
+                r.warnings.append("splat_frame unreadable: %r" % (exc,))
+            else:
+                off = abs(mpu / esdf.metres_per_unit - 1.0)
+                r.notes.append(
+                    "no dataparser_transforms, and correctly so: this capture was "
+                    "solved by COLMAP, whose world is neither level nor metric "
+                    "(nerfstudio's own 'up' is %.1f deg from gravity here), so its "
+                    "dataparser scale is in arbitrary units and makes no claim about "
+                    "the room. splat_frame.json carries the real provenance: %.6f m "
+                    "per unit, recovered from the capture and corrected against the "
+                    "surveyed pole tops, %.1f%% from the %.6f the registration "
+                    "measured."
+                    % (uperr, mpu, off * 100.0, esdf.metres_per_unit))
         else:
             r.warnings.append(
                 "no dataparser_transforms: the metric scale has no provenance "
