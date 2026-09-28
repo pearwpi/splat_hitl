@@ -23,7 +23,7 @@ consistent AT ONCE. If it is not, the size of the error says which:
     all pixels at the empty
     depth ................... the camera is outside the splat, or pointed away
 
-    python3 -m splat_hitl.render_check --bundle scenes/net_2026-09-16 \\
+    python3 -m splat_hitl.render_check --bundle scenes/a2_train \\
         --splat-rendering ../MihirBhat/scripts/splat_rendering.py \\
         --out /tmp/render_check
 
@@ -321,7 +321,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
            "--splat", b.path("splat"),
            "--splat-config", os.path.join(b.root, "nerfstudio_config.yml"),
            "--transforms-json", os.path.join(b.root, "capture_transforms.json"),
-           "--scale-to-metres", "%.6f" % tf.metres_per_unit]
+           "--scale-to-metres", "%.6f" % tf.metres_per_unit,
+           # The manifest's _render_worker_args carries this and the contract's
+           # note claims it ("empty_depth_m matches the worker's
+           # --empty-depth-raw-m 4.0"), but this command used to be built without
+           # it, so the worker ran at its own default of 12.0 m. The POLICY never
+           # saw the difference -- observation.py clips at clip_far_m, and 12.0
+           # and 4.0 clip alike -- which is exactly why it went unnoticed. A tool
+           # whose job is to check a bundle should not launch the worker
+           # differently from the bundle's own instructions.
+           "--empty-depth-raw-m", "%.6f" % sensor.depth.empty_depth_m]
     print("worker: %s\n" % " ".join(cmd))
     client = SplatWorkerClient(sensor, cmd)
     print("handshake: backend=%s scale_to_metres=%.6f (bundle says %.6f)\n"
