@@ -17,7 +17,7 @@ failure as everything else this project has spent its time on.
 So a bundle carries a manifest, and `check()` verifies the parts against each
 other rather than merely counting them:
 
-    python3 -m splat_hitl.bundle scenes/playTunnels
+    python3 -m splat_hitl.bundle scenes/a3_train
 
 ONE THING THAT IS A WARNING AND NOT AN ERROR
 -------------------------------------------
@@ -33,7 +33,7 @@ WHAT IS DELIBERATELY NOT VALIDATED
 The `.splat` itself. Parsing it needs the renderer's dependencies, and this
 package is numpy-only so that it imports on the flight machine. The manifest
 records its size and SHA-256 instead, which catches a truncated copy -- the
-realistic failure for a 6 MB binary moved by hand -- without pulling gsplat in.
+realistic failure for a large binary moved by hand -- without pulling gsplat in.
 """
 from __future__ import annotations
 

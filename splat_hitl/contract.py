@@ -9,8 +9,8 @@ four more ways the two sides can disagree while every component reports healthy:
 
   1. ACTION KIND.  The trainer emits a body acceleration fraction and
      integrates it itself (`v += a*dt`). `commands.to_hover` refuses an
-     acceleration outright. A policy trained today cannot be flown at all
-     until something owns that integrator -- see `commands.VelocityIntegrator`.
+     acceleration outright, so in flight the runtime owns that integrator:
+     `commands.VelocityIntegrator`, the same one SplatEnv uses.
 
   2. CONTROL RATE.  The trainer runs at `control_dt_s = 1/15`. The first HITL
      dry run stepped at 30 Hz. A double integrator driven at twice its training

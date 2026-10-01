@@ -15,8 +15,8 @@ action produces an identical velocity in both. Parity stops being enforced and
 becomes structural: there is no second implementation to drift.
 
 What is deliberately NOT here: the renderer itself. `SplatWorkerClient` speaks
-to a worker process over JSON, and that worker drags torch, gsplat, nerfstudio
-and CUDA. This package is numpy-only and should stay that way, because a
+to a worker process over JSON, and that worker needs torch, gsplat and CUDA.
+This package is numpy-only and should stay that way, because a
 student who cannot import it cannot start.
 
 TWO KINDS OF ACTION
@@ -33,7 +33,7 @@ env picks the matching stage at construction:
 
 Both end at the same place: a clamped world-ENU velocity that steps position.
 So a position controller tuned here and an RL policy trained here are flown by
-identical code, and the gains you find in sim are the gains you fly.
+identical code. The drone itself is not simulated that faithfully: see below.
 
 WHAT IS SIMULATED, AND WHAT IS NOT
 ----------------------------------

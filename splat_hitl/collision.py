@@ -8,7 +8,7 @@ reasonable" is the only available verdict, and a course needs pass/fail.
 
 This is the SCORING signal. It is not the safety layer:
 
-    cf_core geofence      protects the real room. Cuts motors.
+    cf_core geofence      protects the real room. Lands or cuts motors.
     CollisionMonitor      scores the simulation. Ends the run.
 
 They are different mechanisms with different consequences and you need both. A

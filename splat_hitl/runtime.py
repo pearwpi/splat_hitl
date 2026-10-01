@@ -10,11 +10,11 @@ mid-flight or a policy that returns NaN.
 
 THE TIMING CONTRACT
 -------------------
-The driver transmits from its own 50 Hz timer and stops the drone if no command
-arrives for `COMMAND_TIMEOUT_S` (0.30 s); the firmware stops stabilising after
-0.50 s. So this loop does NOT have to hit 50 Hz -- it has to refresh the command
-often enough that the driver's blunt timeout never fires, and to notice trouble
-before that happens.
+The driver transmits from its own 50 Hz timer and holds the drone where it is
+if no command arrives for `COMMAND_TIMEOUT_S` (0.30 s); the firmware levels out
+after 0.50 s and stops the motors after 2 s. So this loop does NOT have to hit
+50 Hz -- it has to refresh the command often enough that the driver's blunt
+timeout never fires, and to notice trouble before that happens.
 
 Hence the states, in order of increasing pessimism:
 
