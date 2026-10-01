@@ -209,6 +209,14 @@ def test_allow_degenerate_escape_hatch():
     assert registration.solve(X, X * 3.0, allow_degenerate=True).ok
 
 
+def test_tilt_is_how_far_the_lab_vertical_is_from_scene_z():
+    heading_only = SplatTransform(rpy_to_matrix(0.0, 0.0, 2.4), np.zeros(3), 1.0)
+    assert heading_only.tilt_deg == pytest.approx(0.0, abs=1e-6)
+    tipped = SplatTransform(rpy_to_matrix(math.radians(63.0), 0.0, 0.7),
+                            np.zeros(3), 1.0)
+    assert tipped.tilt_deg == pytest.approx(63.0)
+
+
 def test_never_returns_a_reflection():
     """Mirrored correspondences must not yield a mirrored 'solution'."""
     X = volume_points(30, RNG)

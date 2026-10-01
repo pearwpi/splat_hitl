@@ -187,6 +187,17 @@ class SplatTransform:
         """Normalised units -> metres. The pipeline's `scale_to_metres`."""
         return 1.0 / self.scale
 
+    @property
+    def tilt_deg(self) -> float:
+        """Angle between the lab's vertical and the scene's +z, in degrees.
+
+        Code that works in scene metres takes +z as up: SplatEnv renders its
+        camera level in the scene frame, and the runtime climbs along +z. So a
+        scene has to be stored level, and this is near zero for one that is.
+        A capture solved by COLMAP is not level until it has been made so.
+        """
+        return math.degrees(math.acos(min(1.0, max(-1.0, float(self.R[2, 2])))))
+
     # -- application -------------------------------------------------------
     def point_to_splat(self, p_vicon_m) -> np.ndarray:
         p = np.asarray(p_vicon_m, dtype=float)

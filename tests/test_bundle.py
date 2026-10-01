@@ -352,3 +352,26 @@ def test_an_unreadable_splat_frame_is_a_warning(tmp_path):
         fh.write("{ this is not json")
     rep = SceneBundle.load(str(tmp_path)).check()
     assert any("splat_frame unreadable" in w for w in rep.warnings)
+
+
+# ------------------------------------------------------------------- level
+def _turned(roll_deg, yaw_deg=0.0):
+    from splat_hitl.frames import rpy_to_matrix
+    R = rpy_to_matrix(np.radians(roll_deg), 0.0, np.radians(yaw_deg))
+    return SplatTransform(R, np.zeros(3), 1.0)
+
+
+def test_a_scene_stored_tilted_from_level_is_an_error(tmp_path):
+    """A COLMAP-solved splat keeps COLMAP's frame, tens of degrees from level,
+    and SplatEnv would render and fly it that way."""
+    root = write_bundle(tmp_path, with_transform=True)
+    _turned(63.0).save(os.path.join(root, "vicon_transform.json"))
+    rep = SceneBundle.load(root).check()
+    assert not rep.ok and any("from level" in e for e in rep.errors)
+
+
+def test_a_scene_turned_in_heading_and_off_by_a_little_is_level(tmp_path):
+    root = write_bundle(tmp_path, with_transform=True)
+    _turned(0.6, yaw_deg=136.6).save(os.path.join(root, "vicon_transform.json"))
+    rep = SceneBundle.load(root).check()
+    assert rep.ok, rep.errors

@@ -63,6 +63,10 @@ MANIFEST_NAME = "manifest.json"
 #: VIO or LiDAR capture lands within about a percent of a tape measure.
 DATAPARSER_SCALE_TOL = 0.03
 
+#: How far a scene's +z may lean from the lab's vertical. Scene-frame code
+#: takes +z as up; the scenes stored level are within 0.7 deg of it.
+MAX_TILT_DEG = 2.0
+
 #: Keys the manifest may name, and whether a bundle is unusable without them.
 #: Several are optional because a scene is useful before it is finished:
 #: `vicon_transform` is missing until someone has been in the lab, and `gates`
@@ -442,6 +446,12 @@ class SceneBundle:
                 "the Vicon registration is %.6f m per unit and the ESDF is "
                 "%.6f. The drone would be scored against a differently sized "
                 "copy of the scene." % (tf.metres_per_unit, esdf.metres_per_unit))
+        if tf is not None and tf.tilt_deg > MAX_TILT_DEG:
+            r.errors.append(
+                "this scene is stored %.1f deg from level: the lab's vertical is "
+                "not its +z. SplatEnv renders and moves the drone as if +z were "
+                "up, so it would train on a tilted world. Store the scene in the "
+                "Vicon frame (captures/tools/level_bundle.py)." % tf.tilt_deg)
 
         # -- the map, and the task it poses ----------------------------------
         self._check_map_and_task(r, esdf, tf, clearance_m)
