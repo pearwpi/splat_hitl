@@ -113,6 +113,43 @@ def test_hover_z_is_absolute_altitude():
     assert math.isclose(cmd.z_distance, 0.75)
 
 
+# ------------------------------------------------- the vertical channel
+def test_hover_integrates_a_climb_onto_the_altitude():
+    up = Action("velocity", "body_flu", [0.0, 0.0, 0.3])
+    cmd, rep = to_hover(up, 0.0, 0.6, climb_dt_s=0.5)
+    assert math.isclose(cmd.z_distance, 0.75) and not rep.any
+
+
+def test_hover_without_a_climb_interval_holds_the_altitude():
+    up = Action("velocity", "body_flu", [0.0, 0.0, 0.3])
+    cmd, _ = to_hover(up, 0.0, 0.6)
+    assert math.isclose(cmd.z_distance, 0.6)
+
+
+def test_hover_descends_for_a_down_command_in_frd():
+    down = Action("velocity", "body_frd", [0.0, 0.0, 0.2])   # +z is DOWN in FRD
+    cmd, _ = to_hover(down, 0.0, 0.6, climb_dt_s=0.5)
+    assert math.isclose(cmd.z_distance, 0.5)
+
+
+def test_hover_climb_is_clamped_before_it_is_integrated():
+    up = Action("velocity", "body_flu", [0.0, 0.0, 5.0])
+    lim = Limits(max_climb_ms=0.6)
+    cmd, rep = to_hover(up, 0.0, 0.6, lim, climb_dt_s=0.1)
+    assert rep.climb and math.isclose(cmd.z_distance, 0.66)
+
+
+def test_hover_altitude_stops_at_the_ceiling():
+    up = Action("velocity", "body_flu", [0.0, 0.0, 0.6])
+    cmd, rep = to_hover(up, 0.0, 1.78, Limits(max_altitude_m=1.80), climb_dt_s=0.1)
+    assert rep.altitude and math.isclose(cmd.z_distance, 1.80)
+
+
+def test_hover_refuses_a_negative_climb_interval():
+    with pytest.raises(ValueError):
+        to_hover(Action("velocity", "body_flu", FWD), 0.0, 0.6, climb_dt_s=-0.1)
+
+
 def test_hover_rejects_acceleration_with_a_useful_reason():
     a = Action("acceleration", "body_flu", [1.0, 0, 0])
     with pytest.raises(ValueError) as e:

@@ -164,6 +164,93 @@ def test_holding_recovers_when_the_pose_comes_back():
     assert r.state == RUNNING and "recovered" in r.events
 
 
+# ------------------------------------------------------- flying in 3D
+class Climb(Policy):
+    """Asks for a constant vertical speed and nothing else."""
+    name = "climb"
+
+    def __init__(self, vz):
+        self.vz = vz
+
+    def act(self, obs, state):
+        return Action("velocity", "body_flu", [0.0, 0.0, self.vz])
+
+
+def climbing_run(vz, n, dt=0.05, z0=0.6, cfg=None):
+    samples = [pose(i * dt, 1.0, z=z0) for i in range(n)]
+    rt, src = build(policy=Climb(vz), samples=samples,
+                    cfg=cfg or RuntimeConfig(hold_altitude_m=z0))
+    out = []
+    for i in range(n):
+        src.advance()
+        out.append(rt.step(i * dt))
+    return rt, src, out
+
+
+def test_a_velocity_policy_climbs_in_flight():
+    """The vertical part of a command used to be dropped: every run flew at
+    hold_altitude_m, so a path over a box in simulation went through it."""
+    rt, _, out = climbing_run(vz=0.3, n=11)
+    assert all(r.state == RUNNING for r in out)
+    assert out[0].command.z_distance == pytest.approx(0.6)        # starts here
+    assert out[-1].command.z_distance == pytest.approx(0.6 + 0.3 * 0.5)
+
+
+def test_a_velocity_policy_descends_in_flight():
+    _, _, out = climbing_run(vz=-0.2, n=11, z0=1.0,
+                             cfg=RuntimeConfig(hold_altitude_m=1.0))
+    assert out[-1].command.z_distance == pytest.approx(1.0 - 0.2 * 0.5)
+
+
+def test_the_climb_stops_at_the_ceiling():
+    _, _, out = climbing_run(vz=0.6, n=11, z0=1.75,
+                             cfg=RuntimeConfig(hold_altitude_m=1.75))
+    assert out[-1].command.z_distance == pytest.approx(1.80)
+    assert out[-1].clamped.altitude
+
+
+def test_holding_keeps_the_altitude_the_policy_reached():
+    """Dropping back to hold_altitude_m on a hold could mean descending onto
+    the box the policy had just climbed over."""
+    rt, src, out = climbing_run(vz=0.3, n=11)
+    reached = out[-1].command.z_distance
+    assert reached > 0.7
+    r = rt.step(0.5 + 0.5)                 # no new sample: the pose goes stale
+    assert r.state == HOLDING
+    assert r.command.z_distance == pytest.approx(reached)
+
+
+def test_recovering_from_a_hold_does_not_integrate_the_hold():
+    rt, src, out = climbing_run(vz=0.3, n=11)
+    reached = out[-1].command.z_distance
+    rt.step(1.0)                           # stale -> HOLDING
+    src.samples.append(pose(1.05, 1.0))
+    src.advance()
+    r = rt.step(1.05)                      # fresh again -> RUNNING
+    assert r.state == RUNNING
+    assert r.command.z_distance == pytest.approx(reached)   # no jump
+
+
+def test_landing_uses_the_drones_height_not_a_scene_coordinate():
+    """Under a scene transform position_m[2] is a SCENE z. Landing on it
+    would cut the descent short -- or declare 'landed' in mid-air."""
+    from splat_hitl.frames import SplatTransform
+    from splat_hitl.runtime import TransformedPoseSource
+    tf = SplatTransform(np.eye(3), np.array([0.0, 0.0, -3.0]), 1.0)  # scene z = vicon z - 3
+    inner = ScriptedPoseSource([pose(0.0, 1.0, z=0.6)])
+    cfg = RuntimeConfig(pose_stale_s=0.15, hold_before_land_s=0.1,
+                        land_complete_m=0.12, land_speed_ms=2.0)
+    rt = Runtime(TransformedPoseSource(inner, tf), FakeRenderer(SENSOR, ROOM),
+                 HoverPolicy(), config=cfg)
+    inner.advance()
+    assert rt.poses.latest().position_m[2] == pytest.approx(-2.4)
+    assert rt.poses.latest().height_m == pytest.approx(0.6)
+    rt.step(1.0)
+    r = rt.step(2.0)
+    assert r.state == LANDING                       # not finished: still at 0.6 m
+    assert r.command.z_distance == pytest.approx(0.6 - 2.0 * cfg.tick_budget_s)
+
+
 def test_holding_too_long_becomes_landing_then_lands():
     cfg = RuntimeConfig(pose_stale_s=0.15, hold_before_land_s=0.5,
                         land_complete_m=0.12, land_speed_ms=2.0)
@@ -301,8 +388,9 @@ def test_transformed_pose_source_converts_position_and_orientation():
                                            (0.0, 0.0, 0.0, 1.0))])
     inner.advance()
     out = TransformedPoseSource(inner, tf).latest()
-    # position: 2 * (R @ [1,0,0.5]) + [1,0,0] = 2*[0,1,0.5] + [1,0,0]
-    assert np.allclose(out.position_m, [1.0, 2.0, 1.0], atol=1e-9)
+    # units: 2 * (R @ [1,0,0.5]) + [1,0,0] = [1, 2, 1]; scene METRES are units
+    # times metres_per_unit, which is 1/scale = 0.5
+    assert np.allclose(out.position_m, [0.5, 1.0, 0.5], atol=1e-9)
     # a level drone in a 90-deg-yawed scene reads as 90 deg of scene yaw
     assert abs(out.yaw_rad - math.pi / 2) < 1e-9
 
@@ -315,23 +403,46 @@ def test_transformed_source_passes_none_through():
     assert src.latest() is None                       # never advanced
 
 
-def test_identity_transform_is_a_no_op_apart_from_scale():
+def test_identity_transform_is_a_no_op_in_metres():
+    """Axes aligned and only the unit scale differing: in METRES that is no
+    change at all. It used to come out as [4, 3, 2] -- normalised units -- and
+    every scene-frame consumer read it as metres."""
     from splat_hitl.frames import SplatTransform
     from splat_hitl.runtime import TransformedPoseSource
     inner = ScriptedPoseSource([pose(0.0, 2.0, z=1.0)])
     inner.advance()
     out = TransformedPoseSource(inner, SplatTransform.identity_metres(0.5)).latest()
-    assert np.allclose(out.position_m, [4.0, 3.0, 2.0])   # 1 unit = 0.5 m
+    assert np.allclose(out.position_m, [2.0, 1.5, 1.0])
+
+
+def test_transformed_source_agrees_with_the_render_check_conversion():
+    """The runtime and render_check must put the drone in the same place:
+    render_check is the path that was validated against a live worker."""
+    from splat_hitl.frames import SplatTransform, rpy_to_matrix
+    from splat_hitl.render_check import vicon_pose_to_worker
+    from splat_hitl.runtime import TransformedPoseSource
+    tf = SplatTransform(rpy_to_matrix(0.02, -0.01, math.radians(61.7)),
+                        np.array([0.3, -0.2, 0.1]), 1.0 / 3.3082)
+    p = np.array([2.1, -0.4, 0.8])
+    inner = ScriptedPoseSource([PoseSample(0.0, p, (0.0, 0.0, 0.0, 1.0))])
+    inner.advance()
+    out = TransformedPoseSource(inner, tf).latest()
+    pos_ref, _ = vicon_pose_to_worker(tf, p, 0.0)
+    assert np.allclose(out.position_m, pos_ref, atol=1e-9)
 
 
 def test_runtime_scores_in_the_scene_frame_through_the_wrapper():
     """A gate defined in scene metres must be hit when the drone crosses the
-    corresponding place in Vicon metres."""
-    from splat_hitl.frames import SplatTransform
+    corresponding place in Vicon metres -- through a transform that rotates,
+    translates AND rescales, so units-for-metres cannot pass by accident."""
+    from splat_hitl.frames import SplatTransform, rpy_to_matrix
     from splat_hitl.runtime import TransformedPoseSource
-    tf = SplatTransform.identity_metres(0.5)          # scene unit = 0.5 m
-    gate_scene = Gate("a", np.array([3.0, 3.0, 2.5]), np.array([1.0, 0, 0]),
-                      2.0, 2.0)
+    R = rpy_to_matrix(0.0, 0.0, math.pi / 2)
+    # 1 unit = 0.5 m; the translation keeps the scene path inside the fake room
+    tf = SplatTransform(R, np.array([5.0, 0.0, 0.0]), 2.0)
+    crossing_vicon = np.array([2.0, 1.5, 1.25])            # the path crosses x = 2
+    centre = tf.point_to_splat(crossing_vicon).reshape(3) * tf.metres_per_unit
+    gate_scene = Gate("a", centre, R @ np.array([1.0, 0, 0]), 2.0, 2.0)
     course = GateCourse([gate_scene])
     inner = ScriptedPoseSource([pose(i * 0.1, 1.0 + i * 0.1, 1.5, 1.25)
                                 for i in range(20)])

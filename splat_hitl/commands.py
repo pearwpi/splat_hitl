@@ -574,13 +574,23 @@ class PositionCommand:
 
 
 def to_hover(action: Action, current_yaw_rad: float, target_altitude_m: float,
-             limits: Limits = Limits(), yaw_sign: int = 1
-             ) -> Tuple[HoverCommand, Clamped]:
+             limits: Limits = Limits(), yaw_sign: int = 1,
+             climb_dt_s: float = 0.0) -> Tuple[HoverCommand, Clamped]:
     """Body-frame velocity + absolute altitude.
 
     The vector is converted to world ENU and back into the body frame, which is
     a no-op for `body_flu` and a real rotation for everything else. Doing it
     through world rather than special-casing keeps one code path.
+
+    THE VERTICAL CHANNEL. Hover carries an absolute altitude, not a vertical
+    speed, so a vertical velocity has to be integrated to be flown at all. With
+    `climb_dt_s` > 0 the clamped vertical velocity is integrated onto
+    `target_altitude_m` over that interval -- the same vertical motion SplatEnv
+    integrates in simulation -- and the returned `z_distance` is the caller's
+    altitude setpoint for its next tick. With 0 the altitude stays where it is,
+    which is what a hold wants. Leaving this out used to fly every policy at
+    one fixed height: a path that climbed over a box in simulation went
+    through it in flight.
     """
     _reject_acceleration(action, "a Hover command")
     if action.kind == "position":
@@ -593,7 +603,10 @@ def to_hover(action: Action, current_yaw_rad: float, target_altitude_m: float,
     world = _clamp_horizontal(to_world_enu(action, current_yaw_rad), limits, rep)
     body = rpy_to_matrix(0.0, 0.0, -current_yaw_rad) @ world     # ENU -> body FLU
     w = _clamp_yaw_rate(action.yaw_rate_rad_s, limits, rep)
-    z = _clamp_altitude(target_altitude_m, limits, rep)
+    if not climb_dt_s >= 0.0:
+        raise ValueError("climb_dt_s must be >= 0, got %r" % (climb_dt_s,))
+    z = _clamp_altitude(target_altitude_m + float(world[2]) * climb_dt_s,
+                        limits, rep)
     return HoverCommand(float(body[0]), float(body[1]),
                         float(yaw_sign * w), z), rep
 

@@ -244,7 +244,9 @@ def main(argv=None) -> int:
                     help="shell command that starts splat_rendering.py")
     ap.add_argument("--fake-room", nargs=3, type=float, default=None,
                     metavar=("W", "D", "H"))
-    ap.add_argument("--hold-altitude-m", type=float, default=0.60)
+    ap.add_argument("--hold-altitude-m", type=float, default=0.60,
+                    help="altitude the run starts at, in metres. The policy's "
+                         "vertical velocity moves it from there.")
     ap.add_argument("--rate-hz", type=float, default=None)
     ap.add_argument("--yaw-sign", type=int, choices=[1, -1], default=1)
     ap.add_argument("--log", default=None, help="write the run log here")

@@ -85,6 +85,17 @@ class PoseSample:
     position_m: np.ndarray
     quat_xyzw: Tuple[float, float, float, float]
     capture_t_s: Optional[float] = None
+    #: height above the floor in the DRONE's frame. Set by a source whose
+    #: position is not in that frame (TransformedPoseSource); None otherwise.
+    altitude_m: Optional[float] = None
+
+    @property
+    def height_m(self) -> float:
+        """Height above the floor in the frame the drone flies in -- what
+        cmd_hover's z_distance means. Once a scene transform is in use,
+        position_m[2] is a SCENE coordinate and is not this."""
+        return (float(self.position_m[2]) if self.altitude_m is None
+                else float(self.altitude_m))
 
     @property
     def yaw_rad(self) -> float:
@@ -167,6 +178,16 @@ class TransformedPoseSource(PoseSource):
     Commands still come out in the drone's BODY frame, which is physical and so
     is the same in either world. The yaw a body-frame conversion needs is scene
     yaw, and that is exactly what this emits.
+
+    METRES, NOT UNITS. `point_to_splat()` hands back NORMALISED splat units,
+    and every consumer downstream wants scene metres: `ESDF.at()` divides by
+    `metres_per_unit` itself, `SplatWorkerClient.render()` divides by the
+    worker's `scale_to_metres` itself, `gates.json` is written in scene metres,
+    and `SplatEnv` trains in them. This used to emit units -- about 3.3x too
+    small on every scene -- so under `--transform` the collision monitor, the
+    gate scoring and the renderer all looked at the wrong place, and nothing
+    complained. `render_check.vicon_pose_to_worker` does the same conversion,
+    and a test holds the two together.
     """
 
     def __init__(self, inner: PoseSource, transform):
@@ -177,18 +198,22 @@ class TransformedPoseSource(PoseSource):
         s = self.inner.latest()
         if s is None:
             return None
-        pos = self.transform.point_to_splat(s.position_m).reshape(3)
+        pos = (self.transform.point_to_splat(s.position_m).reshape(3)
+               * self.transform.metres_per_unit)
         R = self.transform.rotation_to_splat(quat_to_matrix(*s.quat_xyzw))
         # capture_t_s must ride along. Dropping it here silently turned
         # end-to-end latency into NaN the moment a calibration transform was
         # supplied -- that is, in exactly the real HITL configuration, and
         # never in the fake-room dry runs this was tested with.
         return PoseSample(s.t_s, pos, matrix_to_quat(R),
-                          capture_t_s=s.capture_t_s)
+                          capture_t_s=s.capture_t_s, altitude_m=s.height_m)
 
 
 @dataclass
 class RuntimeConfig:
+    #: the altitude a run STARTS at. A policy's vertical velocity moves it from
+    #: there, as SplatEnv does in simulation; HOLDING holds wherever it has got
+    #: to rather than dropping back here, which could be into an obstacle.
     hold_altitude_m: float = 0.60
     #: pose older than this -> HOLDING
     pose_stale_s: float = 0.15
@@ -318,6 +343,13 @@ class Runtime:
         self.episode_yaw_rad: Optional[float] = None
         self._step_times: List[float] = []
         self._rate_checked = False
+        #: the altitude being commanded, in the drone's frame. Integrated from
+        #: the policy's vertical velocity on every RUNNING tick.
+        self.altitude_sp_m = float(self.cfg.hold_altitude_m)
+        #: time of the last RUNNING tick, for that integration. Cleared by any
+        #: tick that does not fly the policy, so recovering from a hold does
+        #: not integrate the whole hold at once.
+        self._last_run_t: Optional[float] = None
         if self.builder is not None:
             self.builder.reset()
         self.policy.reset()
@@ -410,10 +442,11 @@ class Runtime:
             events.append("pose stale: %.0f ms" % (age * 1000.0))
 
         if self.state == LANDING:
-            cmd, rep = self._descend_command(float(pose.position_m[2]))
+            self._last_run_t = None
+            cmd, rep = self._descend_command(pose.height_m)
             self.prev = pose
             self.steps += 1
-            if pose.position_m[2] <= self.cfg.land_complete_m:
+            if pose.height_m <= self.cfg.land_complete_m:
                 return self._finish("landed", events)
             return self._record(TickResult(LANDING, cmd, rep, events, age,
                                            total_s=time.perf_counter() - t_start))
@@ -432,10 +465,11 @@ class Runtime:
             # to land and then commanding a hold for one more tick leaves the
             # state and the command disagreeing, which is exactly the sort of
             # inconsistency that is unreadable in a log afterwards.
+            self._last_run_t = None
             if self.state == LANDING:
-                cmd, rep = self._descend_command(float(pose.position_m[2]))
+                cmd, rep = self._descend_command(pose.height_m)
             else:
-                cmd, rep = self._hold_command(self.cfg.hold_altitude_m)
+                cmd, rep = self._hold_command(self.altitude_sp_m)
             self.prev = pose
             self.steps += 1
             if not stale:
@@ -489,7 +523,8 @@ class Runtime:
                           % math.degrees(yaw_err))
             self.state = HOLDING
             self.hold_started = now
-            cmd, rep = self._hold_command(self.cfg.hold_altitude_m)
+            self._last_run_t = None
+            cmd, rep = self._hold_command(self.altitude_sp_m)
             return self._record(TickResult(
                 HOLDING, cmd, rep, events, age, latency,
                 total_s=time.perf_counter() - t_start, yaw_error_rad=yaw_err))
@@ -545,12 +580,18 @@ class Runtime:
             if ireport.state_saturated:
                 events.append("integrator state saturated")
 
+        climb_dt = 0.0
+        if self._last_run_t is not None:
+            climb_dt = min(max(now - self._last_run_t, 0.0), self.cfg.tick_budget_s)
         try:
-            cmd, rep = to_hover(action, pose.yaw_rad, self.cfg.hold_altitude_m,
-                                self.cfg.limits, self.cfg.yaw_sign)
+            cmd, rep = to_hover(action, pose.yaw_rad, self.altitude_sp_m,
+                                self.cfg.limits, self.cfg.yaw_sign,
+                                climb_dt_s=climb_dt)
         except ValueError as exc:
             events.append("action could not be mapped: %s" % exc)
             return self._finish("action_error", events)
+        self.altitude_sp_m = cmd.z_distance
+        self._last_run_t = now
         if rep.any:
             events.append(str(rep))
 
