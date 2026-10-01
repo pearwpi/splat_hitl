@@ -16,10 +16,11 @@ from splat_hitl.contract import (ActionSpec, ControlSpec, ObservationSpec,
                                  PolicyContract, metric_splat_depth_ppo_v1)
 from splat_hitl.env import (COURSE_COMPLETE, MAX_DURATION, VIRTUAL_COLLISION,
                             VIRTUAL_OUTSIDE, EnvConfig, SplatEnv)
+from splat_hitl.frames import SplatTransform, rpy_to_matrix
 from splat_hitl.gates import Gate, GateCourse
 from splat_hitl.policy import Policy
 from splat_hitl.recorder import TERMINATION_MAP
-from splat_hitl.renderer import FakeRenderer
+from splat_hitl.renderer import FakeRenderer, SplatWorkerClient
 from splat_hitl.runtime import (PoseSample, Runtime, RuntimeConfig,
                                 ScriptedPoseSource)
 from splat_hitl.sensor import DepthEncoding, SensorModel
@@ -47,11 +48,12 @@ def course(x=3.0):
                             np.array([1.0, 0.0, 0.0]), 1.2, 1.2)])
 
 
-def make(c=None, cfg=None, esdf=None, gate_x=3.0):
+def make(c=None, cfg=None, esdf=None, gate_x=3.0, transform=None):
     c = c or contract()
     return SplatEnv(c, FakeRenderer(c.observation.sensor, ROOM), course(gate_x),
                     esdf, cfg or EnvConfig(start_position_m=START, limits=BIG,
-                                           max_steps=400))
+                                           max_steps=400),
+                    transform=transform)
 
 
 # ------------------------------------------------------------- construction
@@ -412,3 +414,160 @@ def test_a_fixed_yaw_velocity_contract_commands_no_yaw_rate_in_flight():
                                yaw_rate_rad_s=1.7),
                         current_yaw_rad=0.0)
     assert out.yaw_rate_rad_s == pytest.approx(1.7)
+
+
+# ----------------------------------------------------------------- altitude
+# Flight never commands a height outside Limits' altitude band: it holds the
+# setpoint at the limit and the run goes on. The env has to do the same, or a
+# policy learns to use height the drone does not have.
+def world_velocity_contract():
+    return velocity_contract(scale=1.0, frame="world_enu")
+
+
+def _registration(tilt_deg=0.0):
+    """Lab -> splat units, shaped like a real one: a yaw, 3.3 m per unit, and
+    the lab floor at scene z = 0.5 rather than 0. `tilt_deg` tips the splat's
+    axes as well, the way a COLMAP-solved capture's are."""
+    scale = 1.0 / 3.3
+    R = rpy_to_matrix(math.radians(tilt_deg), 0.0, math.radians(30.0))
+    return SplatTransform(R, np.array([2.0, 1.5, 0.5]) * scale, scale)
+
+
+def _scene(tf, p_lab):
+    return tf.point_to_splat(p_lab).reshape(3) * tf.metres_per_unit
+
+
+def _lab(tf, p_scene):
+    return tf.point_to_vicon(np.asarray(p_scene) / tf.metres_per_unit).reshape(3)
+
+
+def test_the_drone_stops_at_the_ceiling_and_the_episode_goes_on():
+    env = make(world_velocity_contract())
+    env.reset(seed=0)
+    for _ in range(60):                    # 1 m/s for 4 s: far past 1.80 m
+        _, _, term, trunc, info = env.step([0.0, 0.0, 1.0])
+        assert not (term or trunc), info["reason"]
+        assert env.height_m <= BIG.max_altitude_m + 1e-9
+    assert info["height_m"] == pytest.approx(BIG.max_altitude_m)
+    assert info["altitude_clamped"]
+
+    # only the height is held: the drone still flies forward along the ceiling
+    x0 = env.position_m[0]
+    for _ in range(5):
+        _, _, term, trunc, info = env.step([0.6, 0.0, 0.8])
+    assert not (term or trunc)
+    assert env.position_m[0] > x0 + 0.1
+    assert env.height_m == pytest.approx(BIG.max_altitude_m)
+
+
+def test_the_drone_stops_at_the_floor_limit():
+    env = make(world_velocity_contract())
+    env.reset(seed=0)
+    for _ in range(30):
+        _, _, term, trunc, info = env.step([0.0, 0.0, -1.0])
+        assert not (term or trunc), info["reason"]
+    assert env.height_m == pytest.approx(BIG.min_altitude_m)
+    assert info["altitude_clamped"]
+
+
+def test_a_start_outside_the_band_is_refused():
+    with pytest.raises(ValueError, match="above the floor"):
+        make(cfg=EnvConfig(start_position_m=(1.0, 2.5, 2.0), limits=BIG))
+
+
+def test_jitter_past_a_limit_starts_at_the_limit():
+    env = make(cfg=EnvConfig(start_position_m=(1.0, 2.5, 0.15),
+                             start_jitter_m=0.2, limits=BIG))
+    infos = [env.reset(seed=s)[1] for s in range(20)]
+    heights = [i["height_m"] for i in infos]
+    assert min(heights) == pytest.approx(BIG.min_altitude_m)
+    assert any(i["altitude_clamped"] for i in infos)
+
+
+def test_height_is_the_lab_z_of_the_scene_point():
+    tf = _registration(tilt_deg=63.0)
+    env = make(cfg=EnvConfig(start_position_m=_scene(tf, [1.0, 0.5, 0.6]),
+                             limits=BIG), transform=tf)
+    for p in np.random.default_rng(0).uniform(-3.0, 3.0, size=(20, 3)):
+        env.position_m = p
+        assert env.height_m == pytest.approx(_lab(tf, p)[2], abs=1e-12)
+
+
+def test_the_ceiling_is_measured_from_the_lab_floor_not_scene_z():
+    """A real scene's origin is nowhere near the floor. Clamping scene z
+    would put the ceiling at the wrong height, here half a metre low."""
+    tf = _registration()
+    env = make(world_velocity_contract(),
+               cfg=EnvConfig(start_position_m=_scene(tf, [1.0, 0.5, 0.6]),
+                             limits=BIG, max_steps=400), transform=tf)
+    env.reset(seed=0)
+    for _ in range(60):
+        _, _, term, trunc, info = env.step([0.0, 0.0, 1.0])
+        assert not (term or trunc), info["reason"]
+    assert _lab(tf, env.position_m)[2] == pytest.approx(BIG.max_altitude_m)
+    assert env.position_m[2] == pytest.approx(BIG.max_altitude_m + 0.5)
+    assert info["height_m"] == pytest.approx(BIG.max_altitude_m)
+
+
+def test_a_tilted_scene_is_held_along_the_lab_vertical():
+    """Holding the height must not slide the drone sideways in the lab."""
+    tf = _registration(tilt_deg=40.0)
+    c = world_velocity_contract()
+    start = np.array([1.0, 0.5, 0.6])
+    env = make(c, cfg=EnvConfig(start_position_m=_scene(tf, start),
+                                limits=BIG, max_steps=400), transform=tf)
+    env.reset(seed=0)
+    n = 60
+    for _ in range(n):
+        env.step([0.0, 0.0, 1.0])          # scene +z: partly sideways in this lab
+    sideways = (tf.R.T @ np.array([0.0, 0.0, 1.0]))[:2]
+    lab = _lab(tf, env.position_m)
+    assert lab[2] == pytest.approx(BIG.max_altitude_m)
+    assert np.allclose(lab[:2], start[:2] + (n - 0.5) * c.control.dt_s * sideways,
+                       atol=1e-9)
+
+
+def test_a_scanned_scene_without_its_registration_is_refused():
+    """Only the registration says where the lab floor is in a splat."""
+    c = contract()
+
+    class Unstarted(SplatWorkerClient):    # the type is all the check needs
+        def __init__(self, sensor):
+            self.sensor = sensor
+
+    with pytest.raises(ValueError, match="transform=bundle.transform"):
+        SplatEnv(c, Unstarted(c.observation.sensor), course())
+
+
+def test_env_and_runtime_stop_at_the_same_ceiling():
+    """The parity claim for height: the runtime holds its altitude setpoint
+    at Limits.max_altitude_m, and the env stops the drone at the same place."""
+    c = world_velocity_contract()
+    raw = [0.0, 0.0, 1.0]
+    n = 40
+
+    env = make(c)
+    env.reset(seed=0)
+    positions = [env.position_m.copy()]
+    for _ in range(n):
+        _, _, term, trunc, info = env.step(raw)
+        assert not (term or trunc)
+        positions.append(env.position_m.copy())
+
+    dt = c.control.dt_s
+    samples = [PoseSample(i * dt, p, (0.0, 0.0, 0.0, 1.0))
+               for i, p in enumerate(positions)]
+    rt = Runtime(ScriptedPoseSource(samples),
+                 FakeRenderer(c.observation.sensor, ROOM), Replay(c.action, raw),
+                 config=RuntimeConfig(contract=c, limits=BIG,
+                                      hold_altitude_m=START[2],
+                                      max_duration_s=1e6,
+                                      rate_check_after=10**6))
+    for i in range(n + 1):
+        rt.poses.advance()
+        r = rt.step(now=i * dt)
+        assert r.command is not None, r.events
+    assert r.command.z_distance == pytest.approx(BIG.max_altitude_m)
+    assert r.clamped.altitude
+    assert env.height_m == pytest.approx(BIG.max_altitude_m)
+    assert info["altitude_clamped"]

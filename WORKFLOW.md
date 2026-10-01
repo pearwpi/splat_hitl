@@ -42,7 +42,9 @@ esdf     = bundle.esdf()
 ```
 
 If `check()` reports *"cannot be FLOWN"*, the bundle has no Vicon
-registration yet. You can still train; you cannot yet fly it.
+registration yet. You cannot fly it, and training needs it too: `SplatEnv`
+measures the altitude limits from the lab floor, and the registration is what
+says where that floor is.
 
 A **warning about scale is normal and is not a fault.** A splat's metric scale
 comes from the capture, and a LiDAR or VIO capture is good to roughly a percent.
@@ -166,14 +168,20 @@ WORKER = ["python3", "splat_rendering.py",
           "--scale-to-metres", "%.6f" % bundle.transform().metres_per_unit,
           "--empty-depth-raw-m", "4.0"]
 renderer = SplatWorkerClient(contract.observation.sensor, WORKER)
+start = bundle.task()["scene_frame"]           # the start, in scene metres
 env = SplatEnv(contract, renderer, course, esdf,
-               EnvConfig(start_position_m=(1.0, 2.5, 0.6),
+               EnvConfig(start_position_m=start["start_position_m"],
+                         start_yaw_rad=start["start_yaw_rad"],
                          start_yaw_jitter_rad=0.35,
-                         max_steps=500))
+                         max_steps=500),
+               transform=bundle.transform())   # where the lab floor is
 
 obs, info = env.reset(seed=0)
 obs, reward, terminated, truncated, info = env.step(raw_action)
 ```
+
+The env keeps the drone 0.10-1.80 m above the lab floor and carries on, as
+flight does; `info["altitude_clamped"]` says when it had to.
 
 `raw_action` is your network's raw output — the `[-1, 1]` box. Clipping,
 scaling and the norm limit happen inside, so you are training against exactly

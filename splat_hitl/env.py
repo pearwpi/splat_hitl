@@ -46,7 +46,15 @@ only works because it exploited frictionless flight will show up as overshoot
 on the first HITL run that sim never predicted -- for an acceleration contract
 the `divergence_ms` column measures exactly that gap.
 
-    env = SplatEnv(contract, renderer, course, esdf)
+The altitude limits are flight's too. The runtime never commands a height
+outside `limits.min_altitude_m`..`limits.max_altitude_m` (0.10-1.80 m above
+the lab floor by default), so here the drone stops at those heights and the
+episode carries on, as the flight does. `info["altitude_clamped"]` says when.
+Height is measured from the lab floor, and only the scene's registration says
+where that is, so a scanned scene needs `transform=bundle.transform()`.
+
+    env = SplatEnv(contract, renderer, course, esdf,
+                   transform=bundle.transform())
     obs, info = env.reset(seed=0)
     obs, reward, terminated, truncated, info = env.step(raw_action)
 
@@ -66,9 +74,10 @@ import numpy as np
 from .collision import ESDF, CollisionMonitor
 from .commands import Limits, action_from_raw, make_action_stage
 from .contract import PolicyContract
+from .frames import SplatTransform
 from .gates import PASSED, GateCourse
 from .observation import ObservationBuilder
-from .renderer import RendererClient
+from .renderer import RendererClient, SplatWorkerClient
 
 __all__ = ["EnvConfig", "SplatEnv"]
 
@@ -108,7 +117,8 @@ class EnvConfig:
     outside_penalty: float = -100.0
     timeout_penalty: float = 0.0
     step_penalty: float = -0.05
-    #: envelope. Defaults match the flight limits, which is the point.
+    #: envelope. Defaults match the flight limits, which is the point. That
+    #: includes the altitude band, which the env keeps the drone inside.
     limits: Limits = field(default_factory=Limits)
     seed: int = 0
 
@@ -120,11 +130,17 @@ class SplatEnv:
     and the tests run in an environment that has only numpy. A student who
     wants stable-baselines3 installs it; a student reading the code does not
     have to.
+
+    `transform` is the scene's registration, `bundle.transform()`. The env
+    uses it for one thing: finding the lab floor, so the altitude limits are
+    heights above the floor, as in flight. Leave it out only for
+    `FakeRenderer`, whose room has its floor at z = 0.
     """
 
     def __init__(self, contract: PolicyContract, renderer: RendererClient,
                  course: GateCourse, esdf: Optional[ESDF] = None,
-                 config: EnvConfig = EnvConfig()):
+                 config: EnvConfig = EnvConfig(),
+                 transform: Optional[SplatTransform] = None):
         if contract.observation.sensor.fingerprint() != renderer.sensor.fingerprint():
             raise ValueError(
                 "the contract's sensor (%s) is not the renderer's (%s). Train "
@@ -141,6 +157,41 @@ class SplatEnv:
                 "this environment steps a velocity; the contract emits %r. A "
                 "position contract needs a tracking controller in front of it, "
                 "which is a different env." % (contract.action.kind,))
+        # The lab's vertical and the lab origin, in scene metres. Scene metres
+        # are R @ p_lab + t * metres_per_unit, so lab +z is R's third column
+        # and the origin sits at t * metres_per_unit. A scene's own z axis
+        # need not be the lab's, so the vertical comes from the registration.
+        if transform is None:
+            if isinstance(renderer, SplatWorkerClient):
+                raise ValueError(
+                    "a scanned scene needs its registration: pass "
+                    "transform=bundle.transform(). The env keeps the drone "
+                    "%.2f-%.2f m above the lab floor, as flight does, and "
+                    "only the registration says where that floor is. (No "
+                    "registration yet? "
+                    "transform=SplatTransform.identity_metres(1.0) treats "
+                    "scene z as the height.)"
+                    % (config.limits.min_altitude_m,
+                       config.limits.max_altitude_m))
+            self._up = np.array([0.0, 0.0, 1.0])
+            self._lab_origin_m = np.zeros(3)
+        else:
+            self._up = np.asarray(transform.R, dtype=float)[:, 2].copy()
+            self._lab_origin_m = (np.asarray(transform.t, dtype=float)
+                                  * transform.metres_per_unit)
+        self.transform = transform
+        lo, hi = config.limits.min_altitude_m, config.limits.max_altitude_m
+        h0 = self._height_of(config.start_position_m)
+        if not lo <= h0 <= hi:
+            raise ValueError(
+                "start_position_m is %.2f m above the floor, outside the "
+                "flight limits (%.2f-%.2f m). %s"
+                % (h0, lo, hi,
+                   "It is in scene metres, not Vicon metres." if transform
+                   is not None else
+                   "Without a transform the floor is taken to be z = 0, "
+                   "which is only true of FakeRenderer's room: for a scanned "
+                   "scene, pass transform=bundle.transform()."))
         self.contract = contract
         self.renderer = renderer
         self.course = course
@@ -181,6 +232,7 @@ class SplatEnv:
                                           c.start_yaw_jitter_rad))
 
         self.position_m = p
+        clamped = self._hold_altitude()       # jitter can reach past a limit
         self.yaw_rad = yaw
         self.steps = 0
         self._done = False
@@ -194,7 +246,7 @@ class SplatEnv:
             self.monitor.reset()
         self._prev_gate_distance = self.course.distance_to_next(self.position_m)
         obs = self._observe()
-        return obs, self._info(None)
+        return obs, self._info(None, clamped)
 
     def step(self, raw_action) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
         if self._done:
@@ -217,6 +269,9 @@ class SplatEnv:
         # command does not teleport the drone a full dt on its first tick.
         p_prev = self.position_m.copy()
         self.position_m = p_prev + 0.5 * (v_prev + v_now) * dt
+        # Flight holds its altitude setpoint at the same limits and carries on,
+        # so the drone stops at the limit here and the episode goes on.
+        altitude_clamped = self._hold_altitude()
         self.steps += 1
 
         reward = float(self.cfg.step_penalty)
@@ -252,10 +307,37 @@ class SplatEnv:
 
         terminated = reason is not None and not truncated
         self._done = terminated or truncated
-        return self._observe(), float(reward), terminated, truncated, self._info(reason)
+        return (self._observe(), float(reward), terminated, truncated,
+                self._info(reason, altitude_clamped))
 
     def close(self) -> None:
         self.renderer.close()
+
+    # -- the altitude band --------------------------------------------------
+    @property
+    def height_m(self) -> float:
+        """Height above the lab floor: the number flight's limits apply to."""
+        return self._height_of(self.position_m)
+
+    def _height_of(self, p_m) -> float:
+        p = np.asarray(p_m, dtype=float).reshape(3)
+        return float(self._up @ (p - self._lab_origin_m))
+
+    def _hold_altitude(self) -> bool:
+        """Move the drone straight up or down into the altitude band.
+
+        Only the position moves, not the velocity state, because flight does
+        not touch the state either: a policy that keeps climbing at the
+        ceiling keeps its upward velocity, here and in flight alike.
+        """
+        lim = self.cfg.limits
+        h = self.height_m
+        # a nanometre of slack, so rounding after a clamp is not a new clamp
+        if lim.min_altitude_m - 1e-9 <= h <= lim.max_altitude_m + 1e-9:
+            return False
+        target = min(max(h, lim.min_altitude_m), lim.max_altitude_m)
+        self.position_m = self.position_m + (target - h) * self._up
+        return True
 
     # -- internals ---------------------------------------------------------
     def _observe(self) -> np.ndarray:
@@ -266,11 +348,14 @@ class SplatEnv:
                                    (0.0, 0.0, self.integrator.episode_yaw_rad))
         return self.builder.push(obs.depth_m, obs.rgb)
 
-    def _info(self, reason: Optional[str]) -> Dict[str, Any]:
+    def _info(self, reason: Optional[str],
+              altitude_clamped: bool = False) -> Dict[str, Any]:
         return {
             "reason": reason,
             "steps": self.steps,
             "position_m": self.position_m.copy(),
+            "height_m": self.height_m,
+            "altitude_clamped": bool(altitude_clamped),
             "velocity_world_m_s": self.integrator.velocity_world.copy(),
             "yaw_rad": self.yaw_rad,
             "episode_yaw_rad": self.integrator.episode_yaw_rad,
