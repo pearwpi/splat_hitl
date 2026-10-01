@@ -571,3 +571,35 @@ def test_env_and_runtime_stop_at_the_same_ceiling():
     assert r.clamped.altitude
     assert env.height_m == pytest.approx(BIG.max_altitude_m)
     assert info["altitude_clamped"]
+
+
+# ------------------------------------------------------------------ no gates
+def test_a_scene_without_gates_runs_until_time_or_trouble_ends_it():
+    """A2's scene has no gates. The env must run on it, and an episode ends
+    only on a collision, on leaving the scanned area, or at max_steps."""
+    c = velocity_contract()
+    env = SplatEnv(c, FakeRenderer(c.observation.sensor, ROOM), None,
+                   config=EnvConfig(start_position_m=START, limits=BIG,
+                                    max_steps=20))
+    _, info = env.reset(seed=0)
+    assert info["gates_passed"] == 0 and info["gate_distance_m"] is None
+    for k in range(20):
+        _, r, term, trunc, info = env.step([0.3, 0.0, 0.0])
+        if k < 19:
+            assert not (term or trunc), info["reason"]
+    assert trunc and info["reason"] == MAX_DURATION
+    assert r == pytest.approx(EnvConfig().step_penalty)    # no gate terms
+
+
+def test_a_scene_without_gates_still_scores_a_collision():
+    esdf = synthetic_room(ROOM, voxel_m=0.05, truncation_m=1.0,
+                          obstacles=[{"centre": (2.0, 2.5, 0.6), "radius": 0.3}])
+    c = velocity_contract()
+    env = SplatEnv(c, FakeRenderer(c.observation.sensor, ROOM), None, esdf,
+                   EnvConfig(start_position_m=START, limits=BIG, max_steps=200))
+    env.reset(seed=0)
+    for _ in range(200):
+        _, r, term, trunc, info = env.step([0.5, 0.0, 0.0])
+        if term or trunc:
+            break
+    assert term and info["reason"] == VIRTUAL_COLLISION

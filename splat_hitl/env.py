@@ -131,6 +131,10 @@ class SplatEnv:
     wants stable-baselines3 installs it; a student reading the code does not
     have to.
 
+    `course` is the gates, in the order they are flown. A scene with no gates
+    (A2's planning scene) passes None, and an episode then ends only on a
+    collision, on leaving the scanned area, or at `max_steps`.
+
     `transform` is the scene's registration, `bundle.transform()`. The env
     uses it for one thing: finding the lab floor, so the altitude limits are
     heights above the floor, as in flight. Leave it out only for
@@ -138,7 +142,8 @@ class SplatEnv:
     """
 
     def __init__(self, contract: PolicyContract, renderer: RendererClient,
-                 course: GateCourse, esdf: Optional[ESDF] = None,
+                 course: Optional[GateCourse] = None,
+                 esdf: Optional[ESDF] = None,
                  config: EnvConfig = EnvConfig(),
                  transform: Optional[SplatTransform] = None):
         if contract.observation.sensor.fingerprint() != renderer.sensor.fingerprint():
@@ -241,10 +246,11 @@ class SplatEnv:
         # captures it from the first pose: it is the only heading this episode
         # will ever be seen from.
         self.integrator.reset(episode_yaw_rad=yaw)
-        self.course.reset()
+        if self.course is not None:
+            self.course.reset()
         if self.monitor is not None:
             self.monitor.reset()
-        self._prev_gate_distance = self.course.distance_to_next(self.position_m)
+        self._prev_gate_distance = self._gate_distance()
         obs = self._observe()
         return obs, self._info(None, clamped)
 
@@ -287,7 +293,7 @@ class SplatEnv:
                     reward += self.cfg.collision_penalty
                     reason = VIRTUAL_COLLISION
 
-        if reason is None:
+        if reason is None and self.course is not None:
             for e in self.course.update(p_prev, self.position_m):
                 if e.kind == PASSED:
                     reward += self.cfg.gate_reward
@@ -359,10 +365,15 @@ class SplatEnv:
             "velocity_world_m_s": self.integrator.velocity_world.copy(),
             "yaw_rad": self.yaw_rad,
             "episode_yaw_rad": self.integrator.episode_yaw_rad,
-            "gates_passed": self.course.passed,
-            "gate_distance_m": self.course.distance_to_next(self.position_m),
+            "gates_passed": self.course.passed if self.course is not None else 0,
+            "gate_distance_m": self._gate_distance(),
             "contract_fingerprint": self.contract.fingerprint(),
         }
+
+    def _gate_distance(self) -> Optional[float]:
+        if self.course is None:
+            return None
+        return self.course.distance_to_next(self.position_m)
 
     def as_gym(self):
         """Wrap as a `gymnasium.Env`. Imported here so the dependency is
@@ -372,5 +383,6 @@ class SplatEnv:
 
     def __repr__(self) -> str:
         return ("SplatEnv(obs %s, %d gate(s), %.0f Hz, %s)"
-                % (self.observation_shape, len(self.course.gates),
+                % (self.observation_shape,
+                   0 if self.course is None else len(self.course.gates),
                    self.contract.control.rate_hz, self.contract.fingerprint()))
