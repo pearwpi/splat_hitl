@@ -9,9 +9,15 @@ downstream talks to `RendererClient`, and `FakeRenderer` -- pure numpy, no
 assets -- stands in for it. The loop, the scoring, the safety logic and the
 command mapping are then all provable on a laptop.
 
+THE WORKER SHIPS WITH THIS REPOSITORY
+-------------------------------------
+`worker/splat_rendering.py`, beside this package, is a copy of metric-splat's
+render worker. `worker_command(bundle)` builds the command that starts it on a
+scene; `SplatWorkerClient` runs that command and talks to it.
+
 UNITS: THE WORKER IS NORMALISED ON BOTH SIDES
 ---------------------------------------------
-`metric-splat`'s `splat_rendering.py` worker wants POSITIONS IN NORMALISED
+The `splat_rendering.py` worker wants POSITIONS IN NORMALISED
 SCENE UNITS and returns DEPTH IN NORMALISED SCENE UNITS TOO -- gsplat rasterises
 in the splat's own frame, and the worker's own `empty_depth` is a metre value
 divided by `scale_to_metres` to match. This docstring used to claim the depth
@@ -48,18 +54,22 @@ from __future__ import annotations
 import base64
 import json
 import math
+import os
+import socket
 import subprocess
+import sys
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import List, Optional, Sequence
 
 import numpy as np
 
 from .frames import matrix_to_rpy, rpy_to_matrix
 from .sensor import SensorModel
 
-__all__ = ["Observation", "RendererClient", "FakeRenderer", "SplatWorkerClient"]
+__all__ = ["Observation", "RendererClient", "FakeRenderer", "SplatWorkerClient",
+           "WORKER_SCRIPT", "worker_command"]
 
 # Camera axes (OpenCV: x right, y down, z forward) expressed in body FLU.
 _CAM_TO_BODY = np.array([[0.0, 0.0, 1.0],
@@ -260,11 +270,19 @@ WORKER_CAMERA_BASIS = _CAM_TO_BODY @ np.diag([1.0, -1.0, -1.0])
 
 
 class SplatWorkerClient(RendererClient):
-    """Client for `metric-splat`'s `splat_rendering.py` subprocess worker.
+    """Client for the `splat_rendering.py` render worker.
 
-    The worker runs in its own interpreter because Nerfstudio, gsplat and the
+    Two ways to reach it:
+
+        SplatWorkerClient(sensor, worker_command(bundle, python))
+            starts the worker as a subprocess, on this machine.
+        SplatWorkerClient(sensor, port=7790)
+            connects to one that `worker_server` is serving -- how a flight in
+            the GPU-less Docker container renders on the lab PC's GPU.
+
+    The worker runs in its own interpreter because PyTorch, gsplat and the
     policy stacks cannot share a dependency tree. It speaks newline-delimited
-    JSON over stdin/stdout with base64 float32 payloads:
+    JSON with base64 float32 payloads:
 
         handshake  {"ready": true, "scale_to_metres": ..., "backend": ...}
         request    {"position": [...normalised...], "orientation_rpy": [...],
@@ -282,22 +300,54 @@ class SplatWorkerClient(RendererClient):
     found them and what to re-run after touching any of it.
     """
 
-    def __init__(self, sensor: SensorModel, worker_cmd: Sequence[str],
-                 env: Optional[dict] = None, timeout_s: float = 30.0):
+    def __init__(self, sensor: SensorModel,
+                 worker_cmd: Optional[Sequence[str]] = None,
+                 env: Optional[dict] = None, timeout_s: float = 30.0,
+                 port: Optional[int] = None, host: str = "127.0.0.1"):
         super().__init__(sensor)
+        if (worker_cmd is None) == (port is None):
+            raise ValueError("give SplatWorkerClient a worker command or a port, "
+                             "not both and not neither")
         self.timeout_s = float(timeout_s)
-        self.proc = subprocess.Popen(list(worker_cmd), stdin=subprocess.PIPE,
-                                     stdout=subprocess.PIPE, text=True,
-                                     bufsize=1, env=env)
+        self.proc: Optional[subprocess.Popen] = None
+        self.sock: Optional[socket.socket] = None
+        if port is None:
+            self.proc = subprocess.Popen(list(worker_cmd), stdin=subprocess.PIPE,
+                                         stdout=subprocess.PIPE, text=True,
+                                         bufsize=1, env=env)
+            self._in, self._out = self.proc.stdout, self.proc.stdin
+        else:
+            try:
+                self.sock = socket.create_connection((host, int(port)), timeout=5.0)
+            except OSError as exc:
+                raise RuntimeError(
+                    "no render server on %s:%d (%s). Start one on the lab PC, "
+                    "outside Docker: python3 -m splat_hitl.worker_server "
+                    "--bundle <scene> --python <a python with torch and gsplat>"
+                    % (host, int(port), exc)) from None
+            self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            # No limit while the worker starts -- loading a splat onto the GPU
+            # takes a while -- then timeout_s per frame, so a hung server ends
+            # the run instead of stalling it.
+            self.sock.settimeout(None)
+            self._in = self.sock.makefile("r", encoding="utf-8", newline="\n")
+            self._out = self.sock.makefile("w", encoding="utf-8", newline="\n")
         ready = self._read()
         if not ready.get("ready"):
             raise RuntimeError("render worker did not start: %r" % (ready,))
         self.scale_to_metres = float(ready["scale_to_metres"])
         self.backend = ready.get("backend")
+        #: the scene a worker_server names in its handshake; None otherwise
+        self.scene = ready.get("scene")
+        if self.sock is not None:
+            self.sock.settimeout(self.timeout_s)
 
     def _read(self) -> dict:
-        line = self.proc.stdout.readline()
+        line = self._in.readline()
         if not line:
+            if self.sock is not None:
+                raise RuntimeError("the render server closed the connection. Its "
+                                   "terminal says why.")
             raise RuntimeError("render worker closed its output unexpectedly "
                                "(exit code %r)" % (self.proc.poll(),))
         return json.loads(line)
@@ -312,8 +362,8 @@ class SplatWorkerClient(RendererClient):
                "image_width": int(self.sensor.width),
                "image_height": int(self.sensor.height),
                "fov_x_half_tan": float(math.tan(math.radians(self.sensor.fov_x_deg) / 2.0))}
-        self.proc.stdin.write(json.dumps(req) + "\n")
-        self.proc.stdin.flush()
+        self._out.write(json.dumps(req) + "\n")
+        self._out.flush()
         resp = self._read()
         if not resp.get("ok"):
             raise RuntimeError("render failed: %s" % resp.get("error"))
@@ -329,10 +379,75 @@ class SplatWorkerClient(RendererClient):
                            self.sensor.fingerprint())
 
     def close(self) -> None:
-        if self.proc.poll() is None:
+        if self.proc is not None:
+            if self.proc.poll() is None:
+                try:
+                    self._out.write(json.dumps({"cmd": "close"}) + "\n")
+                    self._out.flush()
+                    self.proc.wait(timeout=5)
+                except Exception:
+                    self.proc.kill()
+        elif self.sock is not None:
             try:
-                self.proc.stdin.write(json.dumps({"cmd": "close"}) + "\n")
-                self.proc.stdin.flush()
-                self.proc.wait(timeout=5)
+                self._out.write(json.dumps({"cmd": "close"}) + "\n")
+                self._out.flush()
             except Exception:
-                self.proc.kill()
+                pass
+            for f in (self._in, self._out, self.sock):
+                try:
+                    f.close()
+                except Exception:
+                    pass
+            self.sock = None
+
+
+# ------------------------------------------------------- starting the worker
+#: The render worker that ships with this repository: `worker/splat_rendering.py`,
+#: next to the package. Found from this file, so it is there in a clone and in
+#: an editable install (`pip install -e .`); a plain `pip install .` copies the
+#: package without it, and `worker_command` then says so.
+WORKER_SCRIPT = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "worker", "splat_rendering.py")
+
+
+def worker_command(bundle, python: Optional[str] = None,
+                   script: Optional[str] = None) -> List[str]:
+    """The command that starts the render worker on `bundle`'s splat.
+
+    Hand it to `SplatWorkerClient`. `python` is an interpreter with PyTorch and
+    gsplat -- often not the one running this code, which is the default.
+    `script` defaults to `WORKER_SCRIPT`.
+
+    Everything else comes from the bundle, so the worker always renders at the
+    scene's own numbers:
+
+        --scale-to-metres    the registration's metres per unit. Left out, the
+                             worker uses the capture's own scale, which is
+                             about a percent out.
+        --empty-depth-raw-m  the contract's empty depth: what a pixel that sees
+                             nothing reads.
+    """
+    tf = bundle.transform()
+    if tf is None:
+        raise ValueError(
+            "%s has no vicon_transform, so there is no measured scale to render "
+            "it at" % bundle.name)
+    splat = bundle.path("splat")
+    if not splat:
+        raise ValueError("%s declares no splat" % bundle.name)
+    script = script or WORKER_SCRIPT
+    if not os.path.isfile(script):
+        raise FileNotFoundError(
+            "no render worker at %s. It ships in splat_hitl's worker/ folder: "
+            "install splat_hitl from a clone with `pip install -e .`, or pass "
+            "script=" % script)
+    root = os.path.abspath(bundle.root)
+    sensor = bundle.contract().observation.sensor
+    return [python or sys.executable, os.path.abspath(script),
+            "--backend", "cleaned-splat",
+            "--splat", os.path.abspath(splat),
+            "--splat-config", os.path.join(root, "nerfstudio_config.yml"),
+            "--transforms-json", os.path.join(root, "capture_transforms.json"),
+            "--scale-to-metres", "%.6f" % tf.metres_per_unit,
+            "--empty-depth-raw-m", "%.6f" % sensor.depth.empty_depth_m]

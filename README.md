@@ -19,13 +19,17 @@ is the point, and its limits are set out in `WORKFLOW.md` §5.
 ```bash
 pip install -e .            # numpy only
 pip install -e ".[train]"   # + gymnasium, for SplatEnv.as_gym()
-python3 -m pytest -q        # 345 tests, no GPU, no ROS, no drone
+python3 -m pytest -q        # the tests: no GPU, no ROS, no drone
 ```
 
 numpy is the only hard dependency on purpose. This package has to import on the
 flight machine, where a missing RL library at 2 a.m. in the lab is a wasted
 session — `rclpy`, `gymnasium` and `crazyflie_interfaces` are imported lazily
 inside the functions that need them.
+
+The renderer that draws camera images from a real scene is not a dependency
+either. It is `worker/splat_rendering.py`, which runs in its own Python with
+PyTorch and gsplat on an NVIDIA GPU — see `worker/README.md`.
 
 ---
 
@@ -73,6 +77,7 @@ name rather than discovered on a drone.
 | `runtime.py` | the flight loop, and every way it degrades |
 | `recorder.py` | run logs, in the same vocabulary as the training logs |
 | `ros_node.py` | the ROS wiring. Deliberately thin |
+| `worker_server.py` | serves the GPU render worker to a flight in the Docker container |
 
 ---
 

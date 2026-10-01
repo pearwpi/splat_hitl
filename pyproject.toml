@@ -31,6 +31,9 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 88
 target-version = "py39"
+# worker/splat_rendering.py is a copy of metric-splat's file, kept byte for
+# byte so the two can be compared. It is not linted here.
+extend-exclude = ["worker"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]        # pycodestyle, pyflakes, import order

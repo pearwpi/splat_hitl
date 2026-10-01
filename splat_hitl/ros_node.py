@@ -5,20 +5,28 @@ This file only moves messages: subscribe to Vicon, call `Runtime.step()`,
 publish what it returns. If you find yourself adding a decision here, it
 probably belongs in the runtime where it can be tested.
 
-    ros2 run ... or:
     python3 -m splat_hitl.ros_node \\
-        --topic /vicon/crazyflie2/crazyflie2 \\
-        --prefix /cf1 \\
-        --sensor config/sensor_model.example.json \\
-        --transform scene_a/vicon_to_splat.json \\
-        --gates scene_a/gates.json \\
-        --esdf scene_a/arena_cleaned_pc_esdf.npy \\
-        --policy my_module:MyPolicy \\
-        --fake-room 4 3 2.5            # or --worker "<python> splat_rendering.py ..."
+        --topic     /vicon/<object>/<object> \\
+        --contract  scenes/a3_train/policy_contract.json \\
+        --transform scenes/a3_train/vicon_transform.json \\
+        --gates     scenes/a3_train/gates.json \\
+        --esdf      scenes/a3_train/a3_train_esdf.npy \\
+        --worker-port 7790 \\
+        --policy    my_policy:MyPolicy \\
+        --dry-run
 
-NOT YET RUN AGAINST HARDWARE. The logic underneath has 240 tests; this shell
-has none, because none of it is testable without a live ROS graph. Bring it up
-the first time with `--dry-run`, which does everything except publish.
+The renderer is one of:
+
+    --worker-port P   a worker served by `worker_server` on this PC. The way to
+                      render from inside the Docker container, which has no GPU.
+    --worker "CMD"    a worker started here, by a shell command. Needs a GPU,
+                      PyTorch and gsplat on the machine this runs on.
+    --fake-room W D H a plain box room, for a policy that does not use images.
+
+Flown on hardware with --fake-room (A2, 2026-09-17). A rendered flight has not
+been flown yet: bring one up with `--dry-run`, which does everything except
+publish. `make_renderer` and `is_solver_flip` are tested without ROS; the rest
+of this file needs a live ROS graph.
 
 SAFETY, EXPLICITLY
 ------------------
@@ -221,6 +229,44 @@ def load_policy(spec: str) -> Policy:
     return obj
 
 
+def make_renderer(a, sensor: SensorModel, transform: Optional[SplatTransform]):
+    """The renderer the flags ask for, checked before anything flies.
+
+    Exactly one of --worker, --worker-port and --fake-room. A real scene needs
+    --transform, and must be the scene the transform belongs to: a worker
+    drawing another scene is refused here rather than flown.
+    """
+    chosen = [flag for flag, v in (("--worker", a.worker),
+                                   ("--worker-port", a.worker_port),
+                                   ("--fake-room", a.fake_room)) if v]
+    if len(chosen) != 1:
+        raise SystemExit("need exactly one of --worker, --worker-port and "
+                         "--fake-room%s" % (" (got %s)" % " and ".join(chosen)
+                                            if chosen else ""))
+    if a.fake_room:
+        return FakeRenderer(sensor, tuple(a.fake_room))
+    if transform is None:
+        raise SystemExit("%s without --transform would render the wrong part of "
+                         "the scene. Pass the scene's vicon_transform.json."
+                         % chosen[0])
+    if a.worker:
+        import shlex
+        renderer = SplatWorkerClient(sensor, shlex.split(a.worker))
+    else:
+        renderer = SplatWorkerClient(sensor, port=a.worker_port)
+    want = transform.metres_per_unit
+    if abs(renderer.scale_to_metres - want) > 1e-4 * want:
+        renderer.close()
+        raise SystemExit(
+            "the renderer draws a scene at %.6f m per unit, but --transform "
+            "belongs to one at %.6f. It is rendering a different scene from the "
+            "one you are flying%s." % (
+                renderer.scale_to_metres, want,
+                "" if renderer.scene is None else " (it is serving %s)"
+                % renderer.scene))
+    return renderer
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -242,6 +288,9 @@ def main(argv=None) -> int:
     ap.add_argument("--policy", default="hover")
     ap.add_argument("--worker", default=None,
                     help="shell command that starts splat_rendering.py")
+    ap.add_argument("--worker-port", type=int, default=None,
+                    help="port of a render server started on this PC with "
+                         "python3 -m splat_hitl.worker_server")
     ap.add_argument("--fake-room", nargs=3, type=float, default=None,
                     metavar=("W", "D", "H"))
     ap.add_argument("--hold-altitude-m", type=float, default=0.60,
@@ -285,13 +334,7 @@ def main(argv=None) -> int:
     if a.esdf:
         monitor = CollisionMonitor(ESDF.load_npy(a.esdf), a.clearance_m)
 
-    if a.worker:
-        import shlex
-        renderer = SplatWorkerClient(sensor, shlex.split(a.worker))
-    elif a.fake_room:
-        renderer = FakeRenderer(sensor, tuple(a.fake_room))
-    else:
-        raise SystemExit("need --worker or --fake-room")
+    renderer = make_renderer(a, sensor, transform)
 
     rclpy.init()
     node = Node("splat_hitl")
@@ -299,9 +342,6 @@ def main(argv=None) -> int:
     source: PoseSource = vicon
     if transform is not None:
         source = TransformedPoseSource(source, transform)
-    elif a.worker:
-        raise SystemExit("--worker without --transform would render the wrong "
-                         "part of the scene; supply the calibration")
 
     cfg = RuntimeConfig(hold_altitude_m=a.hold_altitude_m, yaw_sign=a.yaw_sign,
                         contract=contract)
@@ -309,7 +349,8 @@ def main(argv=None) -> int:
     rec = RunRecorder(time.strftime("%Y%m%d-%H%M%S"), rt.policy.name,
                       sensor.fingerprint(), transform,
                       contract_fingerprint=None if contract is None
-                      else contract.fingerprint())
+                      else contract.fingerprint(),
+                      scene=getattr(renderer, "scene", None))
     pub = node.create_publisher(Hover, "%s/cmd_hover" % a.prefix.rstrip("/"), 10)
     if monitor:
         for w in monitor.warnings:

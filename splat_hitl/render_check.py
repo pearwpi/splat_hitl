@@ -24,10 +24,11 @@ consistent AT ONCE. If it is not, the size of the error says which:
     depth ................... the camera is outside the splat, or pointed away
 
     python3 -m splat_hitl.render_check --bundle scenes/a2_train \\
-        --splat-rendering ../MihirBhat/scripts/splat_rendering.py \\
-        --out /tmp/render_check
+        --python <a python with torch and gsplat> --out /tmp/render_check
 
-Needs a CUDA gsplat, so it runs on the render machine, not on a laptop.
+Needs a CUDA gsplat, so it runs on the render machine, not on a laptop. The
+worker it starts is splat_hitl's own, `worker/splat_rendering.py`, unless
+`--splat-rendering` names another.
 
 WHERE THE POSES COME FROM
 -------------------------
@@ -70,7 +71,7 @@ import numpy as np
 from .blockmap import BlockMap
 from .bundle import SceneBundle
 from .frames import SplatTransform, matrix_to_rpy, rpy_to_matrix
-from .renderer import SplatWorkerClient
+from .renderer import SplatWorkerClient, worker_command
 from .sensor import SensorModel
 
 __all__ = ["write_png", "sphere_trace", "standoff_poses", "centre_depth_m",
@@ -278,8 +279,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--bundle", required=True)
-    ap.add_argument("--splat-rendering", required=True,
-                    help="path to metric-splat's splat_rendering.py")
+    ap.add_argument("--splat-rendering", default=None,
+                    help="the worker script; default: splat_hitl's own, "
+                         "worker/splat_rendering.py")
     ap.add_argument("--python", default=sys.executable,
                     help="interpreter for the worker; it needs CUDA gsplat")
     ap.add_argument("--out", default=None, help="directory for the PNGs")
@@ -316,21 +318,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     contract = b.contract()
     sensor = contract.observation.sensor
 
-    cmd = [a.python, str(a.splat_rendering),
-           "--backend", "cleaned-splat",
-           "--splat", b.path("splat"),
-           "--splat-config", os.path.join(b.root, "nerfstudio_config.yml"),
-           "--transforms-json", os.path.join(b.root, "capture_transforms.json"),
-           "--scale-to-metres", "%.6f" % tf.metres_per_unit,
-           # The manifest's _render_worker_args carries this and the contract's
-           # note claims it ("empty_depth_m matches the worker's
-           # --empty-depth-raw-m 4.0"), but this command used to be built without
-           # it, so the worker ran at its own default of 12.0 m. The POLICY never
-           # saw the difference -- observation.py clips at clip_far_m, and 12.0
-           # and 4.0 clip alike -- which is exactly why it went unnoticed. A tool
-           # whose job is to check a bundle should not launch the worker
-           # differently from the bundle's own instructions.
-           "--empty-depth-raw-m", "%.6f" % sensor.depth.empty_depth_m]
+    # Built by worker_command, the helper training uses too, so the worker is
+    # checked as it is started for real. A hand-built copy of this command once
+    # left out --empty-depth-raw-m and ran at the worker's default of 12.0 m
+    # instead of the contract's 4.0 m.
+    cmd = worker_command(b, python=a.python, script=a.splat_rendering)
     print("worker: %s\n" % " ".join(cmd))
     client = SplatWorkerClient(sensor, cmd)
     print("handshake: backend=%s scale_to_metres=%.6f (bundle says %.6f)\n"
