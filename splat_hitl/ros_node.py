@@ -277,9 +277,9 @@ def main(argv=None) -> int:
                          "the contract carries its own sensor and loading two "
                          "is how they drift apart.")
     ap.add_argument("--contract", default=None,
-                    help="policy contract JSON (config/policy_contract.example"
-                         ".json). Required to fly a policy that emits "
-                         "accelerations or expects a stacked depth history.")
+                    help="the contract the policy was trained with: the "
+                         "scene's policy_contract.json, or a2_contract.json "
+                         "for A2")
     ap.add_argument("--transform", default=None,
                     help="vicon_to_splat.json; omit only for a fake-room dry run")
     ap.add_argument("--gates", default=None)
